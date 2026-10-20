@@ -73,6 +73,88 @@ function Invoke-Tool {
     return [pscustomobject]@{ ExitCode = $code; Output = $output }
 }
 
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class Pcl299WindowProbe
+{
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    public static string[] GetTitles(int processId)
+    {
+        List<string> titles = new List<string>();
+        EnumWindows(delegate(IntPtr hWnd, IntPtr lParam)
+        {
+            uint pid;
+            GetWindowThreadProcessId(hWnd, out pid);
+            if (pid == (uint)processId && IsWindowVisible(hWnd))
+            {
+                StringBuilder text = new StringBuilder(512);
+                GetWindowText(hWnd, text, text.Capacity);
+                if (text.Length > 0) titles.Add(text.ToString());
+            }
+            return true;
+        }, IntPtr.Zero);
+        return titles.ToArray();
+    }
+}
+'@
+
+function Invoke-GuiTool {
+    param(
+        [string]$Executable,
+        [string]$WorkingDirectory,
+        [hashtable]$Environment = @{},
+        [int]$TimeoutSeconds = 20
+    )
+
+    $previous = @{}
+    foreach ($key in $Environment.Keys) {
+        $previous[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
+        [Environment]::SetEnvironmentVariable($key, [string]$Environment[$key], 'Process')
+    }
+
+    $titles = New-Object 'System.Collections.Generic.HashSet[string]'
+    $process = $null
+    try {
+        $process = Start-Process -FilePath $Executable -WorkingDirectory $WorkingDirectory -PassThru
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+            foreach ($title in [Pcl299WindowProbe]::GetTitles($process.Id)) {
+                [void]$titles.Add($title)
+            }
+            Start-Sleep -Milliseconds 100
+            $process.Refresh()
+        }
+        if (-not $process.HasExited) {
+            $process.Kill()
+            $process.WaitForExit()
+            throw "GUI 工具在 $TimeoutSeconds 秒内未退出。"
+        }
+        foreach ($title in [Pcl299WindowProbe]::GetTitles($process.Id)) {
+            [void]$titles.Add($title)
+        }
+        return [pscustomobject]@{ ExitCode = $process.ExitCode; Titles = @($titles) }
+    }
+    finally {
+        if ($null -ne $process) { $process.Dispose() }
+        foreach ($key in $Environment.Keys) {
+            [Environment]::SetEnvironmentVariable($key, $previous[$key], 'Process')
+        }
+    }
+}
+
 function New-OriginalCopy {
     param([string]$Name)
     $directory = Join-Path $runRoot $Name
@@ -93,18 +175,18 @@ if (Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'Plain Craft Laun
 
 New-Item -ItemType Directory -Path $runRoot | Out-Null
 try {
-    Write-Host '[1/11] --help 返回 0'
+    Write-Host '[1/14] --help 返回 0'
     $result = Invoke-Tool $Tool @('--help')
     Assert-Equal $result.ExitCode 0 '--help 退出码'
-    Assert-True ($result.Output -match 'PCL 2.99 原版下载修复工具') '--help 应输出版本标题'
+    Assert-True ($result.Output -match '原版游戏下载恢复工具') '--help 应输出版本标题'
     $passed++
 
-    Write-Host '[2/11] Release EXE 不含测试钩子'
+    Write-Host '[2/14] Release EXE 不含测试钩子'
     $releaseText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($Tool))
     Assert-True (-not $releaseText.Contains('PCL299_TEST_')) 'Release EXE 不应包含 PCL299_TEST_'
     $passed++
 
-    Write-Host '[3/11] 未知哈希返回 2 且不创建备份'
+    Write-Host '[3/14] 未知哈希返回 2 且不创建备份'
     $unsupportedDir = Join-Path $runRoot 'unsupported'
     New-Item -ItemType Directory -Path $unsupportedDir | Out-Null
     $unsupported = Join-Path $unsupportedDir 'not-pcl.exe'
@@ -116,7 +198,7 @@ try {
     Assert-True (-not (Test-Path -LiteralPath ($unsupported + '.pcl-download-fix.bak'))) '未知文件不得创建备份'
     $passed++
 
-    Write-Host '[4/11] 非法已有备份被拒绝且不覆盖'
+    Write-Host '[4/14] 非法已有备份被拒绝且不覆盖'
     $invalidBackupTarget = New-OriginalCopy 'invalid-backup'
     $invalidBackup = $invalidBackupTarget + '.pcl-download-fix.bak'
     [IO.File]::WriteAllBytes($invalidBackup, [byte[]](9, 8, 7, 6))
@@ -128,7 +210,7 @@ try {
     Assert-Equal (Get-Sha256 $invalidBackup) $backupBefore '非法备份不得被覆盖'
     $passed++
 
-    Write-Host '[5/11] PCL 运行中拒绝修改'
+    Write-Host '[5/14] PCL 运行中拒绝修改'
     $runningTarget = New-OriginalCopy 'running-refusal'
     $helperDir = Join-Path $runRoot 'running-helper'
     New-Item -ItemType Directory -Path $helperDir | Out-Null
@@ -167,7 +249,7 @@ try {
     }
     $passed++
 
-    Write-Host '[6/11] 首次修复生成正确补丁并创建备份'
+    Write-Host '[6/14] 首次修复生成正确补丁并创建备份'
     $mutableTarget = New-OriginalCopy 'mutation'
     $mutableBackup = $mutableTarget + '.pcl-download-fix.bak'
     $result = Invoke-Tool $Tool @('--pcl', $mutableTarget, '--no-launch')
@@ -176,7 +258,7 @@ try {
     Assert-Equal (Get-Sha256 $mutableBackup) $originalHash '首次修复创建的备份哈希'
     $passed++
 
-    Write-Host '[7/11] 补丁版重复运行只校验，不二次修改'
+    Write-Host '[7/14] 补丁版重复运行只校验，不二次修改'
     $patchedBefore = Get-Sha256 $mutableTarget
     $backupBefore = Get-Sha256 $mutableBackup
     $result = Invoke-Tool $Tool @('--pcl', $mutableTarget, '--no-launch')
@@ -185,7 +267,7 @@ try {
     Assert-Equal (Get-Sha256 $mutableBackup) $backupBefore '重复运行不得覆盖备份'
     $passed++
 
-    Write-Host '[8/11] 合法已有备份不覆盖'
+    Write-Host '[8/14] 合法已有备份不覆盖'
     $preservedTarget = New-OriginalCopy 'preserved-backup'
     $preservedBackup = $preservedTarget + '.pcl-download-fix.bak'
     Copy-Item -LiteralPath $OriginalPcl -Destination $preservedBackup
@@ -199,7 +281,7 @@ try {
     Assert-True ($timestampDelta -lt 1) '合法已有备份不得被重新复制'
     $passed++
 
-    Write-Host '[9/11] --verify 与 --restore'
+    Write-Host '[9/14] --verify 与 --restore'
     $result = Invoke-Tool $Tool @('--pcl', $mutableTarget, '--verify')
     Assert-Equal $result.ExitCode 0 '补丁版 --verify 退出码'
     $result = Invoke-Tool $Tool @('--pcl', $mutableTarget, '--restore')
@@ -210,7 +292,7 @@ try {
     Assert-Equal $result.ExitCode 0 '恢复后 --verify 退出码'
     $passed++
 
-    Write-Host '[10/11] 启动失败自动回滚并返回 4'
+    Write-Host '[10/14] 启动失败自动回滚并返回 4'
     $rollbackTarget = New-OriginalCopy 'startup-rollback'
     $rollbackBackup = $rollbackTarget + '.pcl-download-fix.bak'
     $result = Invoke-Tool $HookTool @('--pcl', $rollbackTarget) @{ PCL299_TEST_STARTUP_FAILURE = '1' }
@@ -219,7 +301,54 @@ try {
     Assert-Equal (Get-Sha256 $rollbackBackup) $originalHash '启动失败后备份应保持原版'
     $passed++
 
-    Write-Host '[11/11] 恢复失败返回 5 且不损坏备份'
+    Write-Host '[11/14] 新日志中的原版下载列表记录可通过非零退出码启动检查'
+    $evidenceTarget = New-OriginalCopy 'startup-evidence'
+    $evidenceBackup = $evidenceTarget + '.pcl-download-fix.bak'
+    $result = Invoke-Tool $HookTool @('--pcl', $evidenceTarget) @{
+        PCL299_TEST_LAUNCH_EVIDENCE = 'loader'
+        PCL299_TEST_LAUNCH_EXIT_CODE = '-1'
+    }
+    Assert-Equal $result.ExitCode 0 '有启动证据时不应误判退出码 -1'
+    Assert-Equal (Get-Sha256 $evidenceTarget) $patchedHash '有启动证据时应保留补丁版'
+    Assert-Equal (Get-Sha256 $evidenceBackup) $originalHash '有启动证据时备份应保持原版'
+    $passed++
+    Write-Host '[12/14] GUI 自动定位、自动修复并显示成功弹窗'
+    $guiSuccessDir = Join-Path $runRoot 'gui-success'
+    New-Item -ItemType Directory -Path $guiSuccessDir | Out-Null
+    $guiTarget = Join-Path $guiSuccessDir 'Plain Craft Launcher 2.exe'
+    Copy-Item -LiteralPath $OriginalPcl -Destination $guiTarget
+    $guiResult = Invoke-GuiTool $HookTool $guiSuccessDir @{
+        PCL299_TEST_GUI_NO_LAUNCH = '1'
+        PCL299_TEST_GUI_AUTOCLOSE_MS = '3000'
+    }
+    Assert-Equal $guiResult.ExitCode 0 'GUI 成功流程退出码'
+    Assert-True ($guiResult.Titles -contains '修复完成') 'GUI 成功后应显示“修复完成”弹窗'
+    Assert-Equal (Get-Sha256 $guiTarget) $patchedHash 'GUI 自动修复后的补丁哈希'
+    Assert-Equal (Get-Sha256 ($guiTarget + '.pcl-download-fix.bak')) $originalHash 'GUI 自动修复创建的备份哈希'
+    $passed++
+
+    Write-Host '[13/14] GUI 修复失败弹窗、返回码和诊断日志'
+    $guiFailureDir = Join-Path $runRoot 'gui-failure'
+    New-Item -ItemType Directory -Path $guiFailureDir | Out-Null
+    $guiFailureTarget = Join-Path $guiFailureDir 'Plain Craft Launcher 2.exe'
+    [IO.File]::WriteAllBytes($guiFailureTarget, [byte[]](1, 2, 3, 4, 5))
+    $failureBefore = Get-Sha256 $guiFailureTarget
+    $logPath = Join-Path ([IO.Path]::GetTempPath()) 'PCL-2.99-Download-Fix-last.log'
+    if (Test-Path -LiteralPath $logPath) { Remove-Item -LiteralPath $logPath -Force }
+    $guiResult = Invoke-GuiTool $HookTool $guiFailureDir @{
+        PCL299_TEST_GUI_PCL_PATH = $guiFailureTarget
+        PCL299_TEST_GUI_AUTOCLOSE_MS = '3000'
+    }
+    Assert-Equal $guiResult.ExitCode 2 'GUI 失败流程退出码'
+    Assert-True ($guiResult.Titles -contains '修复失败') 'GUI 失败后应显示“修复失败”弹窗'
+    Assert-Equal (Get-Sha256 $guiFailureTarget) $failureBefore 'GUI 失败时不得修改文件'
+    Assert-True (Test-Path -LiteralPath $logPath) 'GUI 失败时应写入诊断日志'
+    $logText = [IO.File]::ReadAllText($logPath, [Text.Encoding]::UTF8)
+    Assert-True ($logText -match '返回码：2') '诊断日志应包含返回码 2'
+    Assert-True ($logText -match ('实际 SHA256：' + $failureBefore)) '诊断日志应包含实际 SHA256'
+    $passed++
+
+    Write-Host '[14/14] 恢复失败返回 5 且不损坏备份'
     $result = Invoke-Tool $Tool @('--pcl', $rollbackTarget, '--no-launch')
     Assert-Equal $result.ExitCode 0 '恢复失败测试前修复退出码'
     Assert-Equal (Get-Sha256 $rollbackTarget) $patchedHash '恢复失败测试前补丁哈希'

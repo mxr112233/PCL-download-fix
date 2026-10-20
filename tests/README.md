@@ -21,6 +21,12 @@
 .\tests\Test-Tool.ps1
 ```
 
+如果原版只保留在固定备份中，可显式指定：
+
+```powershell
+.\tests\Test-Tool.ps1 -OriginalPcl ".\..\Plain Craft Launcher 2.exe.pcl-download-fix.bak"
+```
+
 测试会复制原版 PCL 到 `tests/run-<随机ID>`，只修改测试副本。全部通过后会自动删除临时目录；失败时保留目录用于诊断。
 
 ## 覆盖范围
@@ -35,6 +41,9 @@
 8. 合法已有备份不覆盖。
 9. `--verify` 与 `--restore` 正常工作。
 10. 使用测试钩子模拟启动失败时返回 4，并自动恢复原版。
-11. 目标文件被锁定时 `--restore` 返回 5，备份不损坏。
+11. 新日志中出现原版下载列表加载记录时，即使 PCL 退出码为 -1 也不误回滚。
+12. GUI 自动定位、自动修复并显示“修复完成”弹窗。
+13. GUI 失败时显示“修复失败”弹窗，返回码为 2，诊断日志包含实际 SHA256。
+14. 目标文件被锁定时 `--restore` 返回 5，备份不损坏。
 
 真实下载与启动验收记录见 [../analysis/evidence-summary.md](../analysis/evidence-summary.md)。

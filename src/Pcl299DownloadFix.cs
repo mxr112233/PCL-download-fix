@@ -1,6 +1,8 @@
 using System;
 using System.ComponentModel;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -9,10 +11,10 @@ using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: AssemblyTitle("PCL 2.99 原版下载修复工具")]
+[assembly: AssemblyTitle("原版游戏下载恢复工具")]
 [assembly: AssemblyDescription("为 Plain Craft Launcher 2.99.0.0 (413) 恢复被禁用的原版游戏下载入口")]
 [assembly: AssemblyCompany("mxr112233")]
-[assembly: AssemblyProduct("PCL-2.99-Download-Fix")]
+[assembly: AssemblyProduct("原版游戏下载恢复工具")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 mxr112233. MIT License.")]
 [assembly: AssemblyVersion("1.0.0.0")]
 [assembly: AssemblyFileVersion("1.0.0.0")]
@@ -47,8 +49,8 @@ namespace Pcl299DownloadFix
 
     internal static class Program
     {
-        private const string DefaultExeName = "Plain Craft Launcher 2.exe";
-        private const string BackupSuffix = ".pcl-download-fix.bak";
+        internal const string DefaultExeName = "Plain Craft Launcher 2.exe";
+        internal const string BackupSuffix = ".pcl-download-fix.bak";
         private const string OriginalSha256 = "6B6E1260CB5A1D6A303855F1C60CAB3D0BC1AEBBA7E40A964180188B271E7386";
         private const string PatchedSha256 = "34DE99E6F4ECFF3DE6B7DFFFAD14B501ABEAA5BB61047CCA541BC067A6B9CBE7";
         private const string ExpectedVersion = "2.99.0.0";
@@ -58,7 +60,11 @@ namespace Pcl299DownloadFix
         private const int MethodBodyOffset = 0x2C0C0;
         private const int OriginalCodeSize = 94;
         private const int PatchedCodeSize = 51;
-        private const int StartupObservationMs = 5000;
+        private const int StartupObservationMs = 12000;
+        private const int StartupPollIntervalMs = 200;
+        private const int StartupLogReadBytes = 524288;
+        private const string LoaderEvidence = "loader";
+        private const string GracefulExitEvidence = "graceful-exit";
 
         private static readonly byte[] FatHeaderPrefix = new byte[] { 0x13, 0x30, 0x09, 0x00 };
         private static readonly byte[] PatchBytes = Hex(
@@ -79,53 +85,54 @@ namespace Pcl299DownloadFix
         private const uint MoveFileWriteThrough = 0x8;
         private const uint AttachParentProcess = 0xFFFFFFFF;
 
+        private static Action<string> interactiveReporter;
+
         [STAThread]
         private static int Main(string[] args)
         {
-            bool interactive = args.Length == 0;
-            if (args.Length > 0)
+            if (args.Length == 0)
             {
-                OpenParentConsole();
+                return RunInteractive();
             }
 
+            OpenParentConsole();
             try
             {
                 Options options = Parse(args);
                 if (options.Help)
                 {
-                    ShowHelp(interactive);
+                    ShowHelp(false);
                     return 0;
                 }
-
-                int code = Execute(options);
-                if (interactive && code != 0)
-                {
-                    MessageBox.Show("修复流程未完成，返回码：" + code + "。请查看同目录说明或使用 --verify 检查。",
-                        "PCL 2.99 原版下载修复", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
-                return code;
+                return Execute(options);
             }
             catch (ToolException ex)
             {
                 Report("错误：" + ex.Message);
-                if (interactive)
-                {
-                    MessageBox.Show(ex.Message, "PCL 2.99 原版下载修复", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
                 return ex.ExitCode;
             }
             catch (Exception ex)
             {
                 Report("未处理错误：" + ex.Message);
-                if (interactive)
-                {
-                    MessageBox.Show("发生未处理错误：" + Environment.NewLine + ex.Message,
-                        "PCL 2.99 原版下载修复", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
                 return 3;
             }
         }
 
+        private static int RunInteractive()
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            using (FixerForm form = new FixerForm())
+            {
+                Application.Run(form);
+                return form.ExitCode;
+            }
+        }
+
+        internal static void SetInteractiveReporter(Action<string> reporter)
+        {
+            interactiveReporter = reporter;
+        }
         private static Options Parse(string[] args)
         {
             Options options = new Options();
@@ -170,13 +177,16 @@ namespace Pcl299DownloadFix
             return options;
         }
 
-        private static int Execute(Options options)
+        internal static int Execute(Options options)
         {
             string target = ResolveTarget(options.PclPath);
             if (!File.Exists(target))
             {
                 throw new ToolException(3, "未找到 PCL 文件：" + target);
             }
+
+            Report("PCL 路径：" + target);
+            Report("正在校验 PCL 版本和文件哈希...");
 
             PclKind kind;
             try
@@ -193,12 +203,22 @@ namespace Pcl299DownloadFix
             }
             if (kind == PclKind.Unsupported)
             {
-                Report("拒绝处理：文件 SHA256 不属于受支持的 PCL 2.99.0.0 (413) 原版或本工具补丁版。");
-                Report("文件：" + target);
-                return 2;
+                string actualHash = HashFile(target);
+                string actualVersion = null;
+                try { actualVersion = FileVersionInfo.GetVersionInfo(target).FileVersion; } catch { }
+                throw new ToolException(2,
+                    "不支持的文件：SHA256 不属于受支持的 PCL 2.99.0.0 (413) 原版或本工具补丁版。" +
+                    Environment.NewLine + "文件版本：" + (String.IsNullOrEmpty(actualVersion) ? "(未知)" : actualVersion) +
+                    Environment.NewLine + "实际 SHA256：" + actualHash +
+                    Environment.NewLine + "文件：" + target);
             }
 
             EnsureExpectedVersion(target);
+            Report("文件版本：" + ExpectedVersion + " (413)，SHA256 " +
+                (kind == PclKind.Original ? OriginalSha256 : PatchedSha256) + "。");
+            Report(kind == PclKind.Original
+                ? "检测结果：受支持的原版 PCL 2.99.0.0 (413)。"
+                : "检测结果：PCL 已是本工具的修复版。");
 
             if (options.Verify)
             {
@@ -218,6 +238,7 @@ namespace Pcl299DownloadFix
 
             if (options.Restore)
             {
+                Report("正在从固定备份恢复原版 PCL...");
                 return RestoreTarget(target, kind);
             }
 
@@ -225,15 +246,18 @@ namespace Pcl299DownloadFix
             {
                 if (IsPclRunning(target))
                 {
-                    throw new ToolException(3, "PCL 正在运行，已拒绝修改。请完全退出 PCL 后重试。");
+                    throw new ToolException(3, "PCL 正在运行，暂时无法修改。请完全退出 PCL 后点击“重新尝试”。");
                 }
 
+                Report("正在创建原版备份并校验...");
                 EnsureBackupFromOriginal(target);
+                Report("正在写入补丁并执行完整文件校验...");
                 ApplyPatch(target);
                 Report("修复完成：已备份原版并写入补丁，补丁版 SHA256 " + PatchedSha256 + "。");
             }
             else
             {
+                Report("正在复核补丁与备份状态...");
                 VerifyPatchedLayout(target);
                 ValidateOptionalBackup(target);
                 Report("PCL 已是修复版，无需再次修改。");
@@ -241,6 +265,7 @@ namespace Pcl299DownloadFix
 
             if (options.NoLaunch)
             {
+                Report("已按参数要求完成修复，不启动 PCL。");
                 return 0;
             }
 
@@ -250,27 +275,30 @@ namespace Pcl299DownloadFix
                 return 0;
             }
 
+            Report("正在启动 PCL...");
             string launchError;
             if (TryLaunchAndObserve(target, out launchError))
             {
-                Report("PCL 已启动。");
+                Report("PCL 已成功启动，下载入口现在可以正常使用。");
                 return 0;
             }
 
-            Report("PCL 启动失败：" + launchError);
             try
             {
                 RestoreFromBackup(target);
-                Report("已自动从备份恢复原版 PCL。");
-                return 4;
             }
             catch (Exception rollbackError)
             {
-                Report("自动回滚失败：" + rollbackError.Message);
-                return 5;
+                throw new ToolException(5,
+                    "PCL 启动失败，且自动回滚也没有完成。" + Environment.NewLine +
+                    "启动错误：" + launchError + Environment.NewLine +
+                    "回滚错误：" + rollbackError.Message);
             }
-        }
 
+            throw new ToolException(4,
+                "PCL 启动失败，已自动从备份恢复原版。" + Environment.NewLine +
+                "启动错误：" + launchError);
+        }
         private static string ResolveTarget(string requested)
         {
             string path;
@@ -383,6 +411,7 @@ namespace Pcl299DownloadFix
             if (File.Exists(backup))
             {
                 ValidateBackup(backup);
+                Report("检测到已有原版备份，保留且不覆盖：" + backup);
                 return;
             }
             if (Directory.Exists(backup))
@@ -552,7 +581,60 @@ namespace Pcl299DownloadFix
                 error = "测试注入：模拟启动失败。";
                 return false;
             }
+
+            string simulatedEvidence = Environment.GetEnvironmentVariable("PCL299_TEST_LAUNCH_EVIDENCE");
+            if (!String.IsNullOrEmpty(simulatedEvidence))
+            {
+                Dictionary<string, long> simulatedLogLengths = CapturePclLogLengths(target);
+                DateTime simulatedLaunchUtc = DateTime.UtcNow;
+                if (String.Equals(simulatedEvidence, "loader", StringComparison.Ordinal))
+                {
+                    string logDirectory = Path.Combine(Path.GetDirectoryName(target), "PCL");
+                    Directory.CreateDirectory(logDirectory);
+                    string logPath = Path.Combine(logDirectory, "Log1.txt");
+                    File.WriteAllText(logPath,
+                        "20:00:00 I [ModLoader] 加载器 LoaderTask`2 DlClientList Mojang 状态改变：Loading" +
+                        Environment.NewLine,
+                        new UTF8Encoding(false));
+                }
+                Thread.Sleep(100);
+                string simulatedFound;
+                bool simulatedEvidenceFound = TryFindFreshStartupEvidence(target,
+                    simulatedLaunchUtc, simulatedLogLengths, out simulatedFound);
+                string simulatedExitText = Environment.GetEnvironmentVariable(
+                    "PCL299_TEST_LAUNCH_EXIT_CODE");
+                if (!String.IsNullOrEmpty(simulatedExitText))
+                {
+                    int simulatedExitCode;
+                    if (!Int32.TryParse(simulatedExitText, out simulatedExitCode))
+                    {
+                        error = "测试注入：无效的退出码。";
+                        return false;
+                    }
+                    ProcessStartInfo exitInfo = new ProcessStartInfo(
+                        Environment.GetEnvironmentVariable("ComSpec"),
+                        "/c exit " + simulatedExitCode.ToString());
+                    exitInfo.UseShellExecute = false;
+                    exitInfo.CreateNoWindow = true;
+                    using (Process exitProcess = Process.Start(exitInfo))
+                    {
+                        exitProcess.WaitForExit();
+                        if (exitProcess.ExitCode == 0 || simulatedEvidenceFound)
+                        {
+                            return true;
+                        }
+                    }
+                }
+                else if (simulatedEvidenceFound)
+                {
+                    return true;
+                }
+                error = "测试注入：未检测到新的 PCL 原版下载列表加载记录。";
+                return false;
+            }
 #endif
+            Dictionary<string, long> logLengths = CapturePclLogLengths(target);
+            DateTime launchedAtUtc = DateTime.UtcNow;
             try
             {
                 ProcessStartInfo startInfo = new ProcessStartInfo();
@@ -565,15 +647,111 @@ namespace Pcl299DownloadFix
                     error = "Process.Start 未返回进程对象。";
                     return false;
                 }
-                if (!process.WaitForExit(StartupObservationMs))
+
+                bool windowSeen = false;
+                string evidence = null;
+                Stopwatch watch = Stopwatch.StartNew();
+                try
+                {
+                    while (watch.ElapsedMilliseconds < StartupObservationMs)
+                    {
+                        bool exited;
+                        try
+                        {
+                            exited = process.HasExited;
+                        }
+                        catch (Exception ex)
+                        {
+                            error = "无法读取 PCL 进程状态：" + ex.Message;
+                            return false;
+                        }
+
+                        if (!exited)
+                        {
+                            try
+                            {
+                                process.Refresh();
+                                if (process.MainWindowHandle != IntPtr.Zero ||
+                                    !String.IsNullOrWhiteSpace(process.MainWindowTitle))
+                                {
+                                    windowSeen = true;
+                                }
+                            }
+                            catch
+                            {
+                            }
+                        }
+
+                        bool hasEvidence = TryFindFreshStartupEvidence(target, launchedAtUtc,
+                            logLengths, out evidence);
+                        if (hasEvidence &&
+                            (windowSeen || String.Equals(evidence, LoaderEvidence, StringComparison.Ordinal)))
+                        {
+                            return true;
+                        }
+
+                        if (exited)
+                        {
+                            int exitCode;
+                            try
+                            {
+                                exitCode = process.ExitCode;
+                            }
+                            catch (Exception ex)
+                            {
+                                error = "PCL 已退出，但无法读取退出码：" + ex.Message;
+                                return false;
+                            }
+
+                            if (exitCode == 0)
+                            {
+                                return true;
+                            }
+
+                            // PCL 2.99 在正常关闭时可能返回 -1。日志刚写入时文件句柄
+                            // 也可能尚未刷新，因此退出后短暂等待并再次检查。
+                            Thread.Sleep(300);
+                            hasEvidence = TryFindFreshStartupEvidence(target, launchedAtUtc,
+                                logLengths, out evidence);
+                            if (hasEvidence &&
+                                (String.Equals(evidence, LoaderEvidence, StringComparison.Ordinal) ||
+                                 (windowSeen && String.Equals(evidence, GracefulExitEvidence,
+                                     StringComparison.Ordinal))))
+                            {
+                                return true;
+                            }
+
+                            error = "PCL 在启动阶段退出，退出码 " + exitCode +
+                                "；未检测到原版下载列表加载记录。" +
+                                (windowSeen ? "主窗口曾出现。" : "主窗口未出现。");
+                            return false;
+                        }
+
+                        Thread.Sleep(StartupPollIntervalMs);
+                    }
+                }
+                finally
+                {
+                    process.Dispose();
+                }
+
+                bool finalEvidence = TryFindFreshStartupEvidence(target, launchedAtUtc,
+                    logLengths, out evidence);
+                if (finalEvidence &&
+                    (windowSeen || String.Equals(evidence, LoaderEvidence, StringComparison.Ordinal)))
                 {
                     return true;
                 }
-                if (process.ExitCode == 0)
+                if (windowSeen)
                 {
-                    return true;
+                    error = "PCL 主窗口已出现，但 " + (StartupObservationMs / 1000) +
+                        " 秒内没有检测到原版下载列表加载记录。";
                 }
-                error = "PCL 在启动阶段退出，退出码 " + process.ExitCode + "。";
+                else
+                {
+                    error = "PCL 在 " + (StartupObservationMs / 1000) +
+                        " 秒内没有显示主窗口，也没有产生可识别的启动日志。";
+                }
                 return false;
             }
             catch (Exception ex)
@@ -583,6 +761,146 @@ namespace Pcl299DownloadFix
             }
         }
 
+        private static Dictionary<string, long> CapturePclLogLengths(string target)
+        {
+            Dictionary<string, long> result = new Dictionary<string, long>(
+                StringComparer.OrdinalIgnoreCase);
+            string[] files = GetPclLogFiles(target);
+            for (int i = 0; i < files.Length; i++)
+            {
+                try
+                {
+                    result[files[i]] = new FileInfo(files[i]).Length;
+                }
+                catch
+                {
+                }
+            }
+            return result;
+        }
+
+        private static string[] GetPclLogFiles(string target)
+        {
+            List<string> files = new List<string>();
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string executableDirectory = Path.GetDirectoryName(target);
+            List<string> directories = new List<string>();
+            directories.Add(executableDirectory);
+            directories.Add(Path.Combine(executableDirectory, "PCL"));
+
+            for (int i = 0; i < directories.Count; i++)
+            {
+                try
+                {
+                    if (!Directory.Exists(directories[i]))
+                    {
+                        continue;
+                    }
+                    string[] found = Directory.GetFiles(directories[i], "Log*.txt",
+                        SearchOption.TopDirectoryOnly);
+                    for (int j = 0; j < found.Length; j++)
+                    {
+                        string fullPath = Path.GetFullPath(found[j]);
+                        if (seen.Add(fullPath))
+                        {
+                            files.Add(fullPath);
+                        }
+                    }
+                }
+                catch
+                {
+                }
+            }
+            return files.ToArray();
+        }
+
+        private static bool TryFindFreshStartupEvidence(string target, DateTime launchedAtUtc,
+            Dictionary<string, long> previousLengths, out string evidence)
+        {
+            evidence = null;
+            bool gracefulExitSeen = false;
+            string[] files = GetPclLogFiles(target);
+            DateTime freshnessCutoff = launchedAtUtc.AddSeconds(-2);
+            for (int i = 0; i < files.Length; i++)
+            {
+                try
+                {
+                    FileInfo info = new FileInfo(files[i]);
+                    long previousLength;
+                    bool wasKnown = previousLengths.TryGetValue(files[i], out previousLength);
+                    bool changed = !wasKnown || info.Length != previousLength ||
+                        info.LastWriteTimeUtc >= freshnessCutoff;
+                    if (!changed)
+                    {
+                        continue;
+                    }
+
+                    long offset = wasKnown && info.Length > previousLength ? previousLength : 0;
+                    string text = ReadLogFragment(files[i], offset, StartupLogReadBytes);
+                    if (text.IndexOf("DlClientList Mojang", StringComparison.Ordinal) >= 0 &&
+                        text.IndexOf("状态改变：Loading", StringComparison.Ordinal) >= 0)
+                    {
+                        evidence = LoaderEvidence;
+                        return true;
+                    }
+                    if (text.IndexOf("程序已退出，返回值：Success",
+                        StringComparison.Ordinal) >= 0)
+                    {
+                        gracefulExitSeen = true;
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            if (gracefulExitSeen)
+            {
+                evidence = GracefulExitEvidence;
+                return true;
+            }
+            return false;
+        }
+
+        private static string ReadLogFragment(string path, long offset, int maxBytes)
+        {
+            try
+            {
+                using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete))
+                {
+                    if (offset < 0 || offset > stream.Length)
+                    {
+                        offset = 0;
+                    }
+                    long available = stream.Length - offset;
+                    int count = (int)Math.Min((long)maxBytes, available);
+                    if (count <= 0)
+                    {
+                        return String.Empty;
+                    }
+                    stream.Position = offset;
+                    byte[] bytes = new byte[count];
+                    int total = 0;
+                    while (total < count)
+                    {
+                        int read = stream.Read(bytes, total, count - total);
+                        if (read <= 0)
+                        {
+                            break;
+                        }
+                        total += read;
+                    }
+                    string utf8 = Encoding.UTF8.GetString(bytes, 0, total);
+                    string localized = Encoding.Default.GetString(bytes, 0, total);
+                    return utf8 + Environment.NewLine + localized;
+                }
+            }
+            catch
+            {
+                return String.Empty;
+            }
+        }
         private static bool IsPclRunning(string target)
         {
             string fullTarget;
@@ -743,12 +1061,23 @@ namespace Pcl299DownloadFix
         private static void Report(string message)
         {
             Console.WriteLine(message);
+            Action<string> reporter = interactiveReporter;
+            if (reporter != null)
+            {
+                try
+                {
+                    reporter(message);
+                }
+                catch
+                {
+                }
+            }
         }
 
         private static void ShowHelp(bool interactive)
         {
             string help =
-                "PCL 2.99 原版下载修复工具 v1.0.0" + Environment.NewLine +
+                "原版游戏下载恢复工具" + Environment.NewLine +
                 "仅支持 PCL 2.99.0.0 (413) 原版及其对应补丁版。" + Environment.NewLine + Environment.NewLine +
                 "用法：" + Environment.NewLine +
                 "  PCL-2.99-Download-Fix.exe [选项]" + Environment.NewLine + Environment.NewLine +
@@ -761,7 +1090,7 @@ namespace Pcl299DownloadFix
                 "返回码：0 成功；2 不支持的文件；3 文件或备份错误；4 启动失败并已回滚；5 恢复失败。";
             if (interactive)
             {
-                MessageBox.Show(help, "PCL 2.99 原版下载修复", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(help, "原版游戏下载恢复", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             else
             {

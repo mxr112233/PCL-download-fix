@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [switch]$TestHooks
 )
@@ -6,6 +6,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $src = Join-Path $root 'src\Pcl299DownloadFix.cs'
+$ui = Join-Path $root 'src\InteractiveUi.cs'
 $manifest = Join-Path $root 'src\app.manifest'
 $dist = Join-Path $root 'dist'
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
@@ -30,7 +31,8 @@ $compilerArgs = @(
     '/reference:System.Core.dll',
     '/reference:System.Drawing.dll',
     '/reference:System.Windows.Forms.dll',
-    $src
+    $src,
+    $ui
 )
 if ($TestHooks) {
     $compilerArgs = @('/define:PCL299_TEST_HOOKS') + $compilerArgs
