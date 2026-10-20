@@ -1,6 +1,10 @@
 # PCL 2.99 原版下载修复
 
 > **非官方第三方修复。** 本项目与 Plain Craft Launcher、Mojang、Microsoft 均无隶属或授权关系。
+>
+> **开发方式声明：本项目完全由 Vibecoding 完成。**
+>
+> 协作署名：DeepSeek。
 
 本项目用于恢复 **Plain Craft Launcher 2 `2.99.0.0 (413)`** 中被禁用的原版 Minecraft 下载入口。修复通过静态分析定位 `PCL.PageDownloadInstall.LoaderInit`，只恢复该方法的正常控件初始化逻辑，不修改其他下载模块、PCL 元数据或用户游戏数据。
 
@@ -85,13 +89,7 @@ Plain Craft Launcher 2.exe.pcl-download-fix.bak
 
 ## 验收记录
 
-2026-10-20 已完成以下测试：
-
-- REA 6.7.0 静态检查，确认方法引用和字段访问已恢复。
-- 隔离目录真实下载 Mojang 正式版 `26.3`：JSON、客户端 JAR、74 个 Libraries、5,147 个 Assets 对象。
-- 使用该版本要求的 Java 25 成功启动 Minecraft，窗口稳定运行超过 60 秒。
-- 真实 PCL 修复后界面显示“最新版本 / 正式版 / 原版游戏 / 开始下载”，不再显示“关闭下载”。
-- 工具自动化测试 11 项全部通过，包括未知哈希、运行中拒绝、备份保护、重复运行、恢复、启动失败回滚和恢复失败返回码。
+2026-10-20 已完成静态复核、隔离环境原版下载与游戏启动、PCL 下载界面检查，以及工具异常路径和恢复流程测试。验证过程未改动现有游戏目录、账户或存档。
 
 脱敏证据见 [analysis/evidence-summary.md](analysis/evidence-summary.md)。
 
