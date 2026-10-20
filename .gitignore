@@ -1,0 +1,18 @@
+# Raw REA analysis output is retained locally only.
+analysis/*.json
+
+# Local test and reverse-engineering work products.
+work/
+tests/run-*/
+tests/smoke-*/
+tests/failure-*/
+dist/*.test.exe
+
+# Generated release archives.
+release/
+
+# Logs, temporary files and local backups.
+*.log
+*.tmp
+*.bak
+*.png
