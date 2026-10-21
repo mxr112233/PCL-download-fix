@@ -1,4 +1,4 @@
-# 原版游戏下载恢复工具（第一版）
+# PCL-download-fix v1.0.0
 
 > **非官方第三方修复。** 本项目与 Plain Craft Launcher、Mojang、Microsoft 均无隶属或授权关系。
 >
