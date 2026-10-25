@@ -11,13 +11,13 @@ using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: AssemblyTitle("原版游戏下载恢复工具")]
-[assembly: AssemblyDescription("为 Plain Craft Launcher 2.99.0.0 (413) 恢复被禁用的原版游戏下载入口")]
+[assembly: AssemblyTitle("PCL 2.99 下载与整合包修复工具")]
+[assembly: AssemblyDescription("为 Plain Craft Launcher 2.99.0.0 (413) 恢复原版游戏下载入口和整合包导入功能")]
 [assembly: AssemblyCompany("mxr112233")]
-[assembly: AssemblyProduct("原版游戏下载恢复工具")]
+[assembly: AssemblyProduct("PCL 2.99 下载与整合包修复工具")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 mxr112233. MIT License.")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 namespace Pcl299DownloadFix
 {
@@ -25,7 +25,8 @@ namespace Pcl299DownloadFix
     {
         Unsupported,
         Original,
-        Patched
+        DownloadPatched,
+        FullyPatched
     }
 
     internal sealed class ToolException : Exception
@@ -52,14 +53,23 @@ namespace Pcl299DownloadFix
         internal const string DefaultExeName = "Plain Craft Launcher 2.exe";
         internal const string BackupSuffix = ".pcl-download-fix.bak";
         private const string OriginalSha256 = "6B6E1260CB5A1D6A303855F1C60CAB3D0BC1AEBBA7E40A964180188B271E7386";
-        private const string PatchedSha256 = "34DE99E6F4ECFF3DE6B7DFFFAD14B501ABEAA5BB61047CCA541BC067A6B9CBE7";
+        private const string DownloadPatchedSha256 = "34DE99E6F4ECFF3DE6B7DFFFAD14B501ABEAA5BB61047CCA541BC067A6B9CBE7";
+        private const string FullyPatchedSha256 = "AFC49BCD281D365D01D17C349C559DDB344DB00D9E403FFE088A47F83D88B9BB";
         private const string ExpectedVersion = "2.99.0.0";
-        private const long ExpectedLength = 5980160L;
+        private const int OriginalFileLength = 5980160;
+        private const int FullyPatchedFileLength = 5982208;
         private const int MethodHeaderOffset = 0x2C0B4;
         private const int CodeSizeOffset = 0x2C0B8;
         private const int MethodBodyOffset = 0x2C0C0;
         private const int OriginalCodeSize = 94;
         private const int PatchedCodeSize = 51;
+        private const int Rid495RvaOffset = 0x0AFD46;
+        private const int Rid496RvaOffset = 0x0AFD58;
+        private const int ModpackBody495Offset = 0x3D4;
+        private const int ExpandedHeaderBytes = 0x200;
+        private const int ModpackSectionRawSize = 0x600;
+        private const int ModpackSectionVirtualSize = 0x44A;
+        private const uint ModpackSectionCharacteristics = 0x60000020;
         private const int StartupObservationMs = 12000;
         private const int StartupPollIntervalMs = 200;
         private const int StartupLogReadBytes = 524288;
@@ -71,6 +81,22 @@ namespace Pcl299DownloadFix
             "02-28-12-05-00-06-02-02-6F-07-06-00-06-02-6F-05-06-00-06" +
             "02-6F-51-05-00-06-14-7E-0F-04-00-04-02-FE-06-1C-06-00-06" +
             "73-8D-05-00-0A-14-17-28-CA-00-00-2B-2A");
+        private static readonly byte[] ModpackPatchSection = Convert.FromBase64String(
+            "GzAFAHoDAABoAAARcjtGAHACJS0GJnJTRgBwKGQAAAoWcl1GAHAo3QAAChQLcrYDAHAMcvZGAHAovgoABgMo0QAACg0JchhHAHBv" +
+            "4gEACi0NCXIcRwBwb+IBAAosGHIgRwBwCSjAAAAKGBcoZAIABnPCAgAKehUTBAISBf4VNgAAAREFKF4DAAoLB3JCRwBwb18DAAos" +
+            "CBkTBN1HAgAAB3JgRwBwb18DAAosCBgTBN0yAgAAB3J8RwBwb18DAAosCBoTBN0dAgAAB3KkRwBwb18DAAosQAdypEcAcG9fAwAK" +
+            "b2ADAAooYQMACihiAwAKKDMDAAp0fAAAAXLARwBwb+8BAAotCBYTBN3YAQAAGRME3dABAAAHcs5HAHBvXwMACiwIFxME3bsBAAAH" +
+            "cuhHAHBvXwMACi0NB3IASABwb18DAAosCR8JEwTdmAEAAAAHb2MDAApvZAMAChMGOBMBAAARBm9lAwAKEwcRB29mAwAKcmwwAHAW" +
+            "KGcDAAoTCBEIFppybDAAcCjAAAAKDBEIKIEAACsYQNoAAAARCBeackJHAHAWKLAAAAotCBkTBN0zAQAAEQgXmnJgRwBwFiiwAAAK" +
+            "LQgYEwTdGgEAABEIF5pyfEcAcBYosAAACi0IGhME3QEBAAARCBeacqRHAHAWKLAAAAotPREHb2ADAAooYQMACihiAwAKKDMDAAp0" +
+            "fAAAAXLARwBwb+8BAAotCBYTBN3BAAAAGRMEch5IAHAM3bMAAAARCBeacs5HAHAWKLAAAAotCBcTBN2aAAAAEQgXmnLoRwBwFiiw" +
+            "AAAKLBERCBeacgBIAHAWKLAAAAotBh8JEwTechEGbygAAAo64f7//94MEQYsBxEGbycAAArc3lYlKGIAAAoTCREJFyjTAQAKcjRI" +
+            "AHBv4gEACiwNclZIAHARCXNoAwAKegIoaQMACnJqSABwFiiwAAAKLQ1yckgAcBEJc2gDAAp6csJIAHARCXNoAwAKehEEHwk7awAA" +
+            "ABEERQUAAAAFAAAAFQAAACMAAAAxAAAAQAAAADhZAAAAAgcIAwQo9AEABgo4VgAAAAIHCCj2AQAGCjhIAAAAAgcIKPcBAAYKODoA" +
+            "AAACBwgDKPgBAAYKOCsAAAACBwgDBCj1AQAGCjgbAAAAAgcIKPkBAAYKOA0AAAACByj6AQAGCjgAAAAA3QoAAAAHLAYHb2oDAArc" +
+            "BioAAEFIAAACAAAAQwEAADMBAAB2AgAADAAAAAAAAAAAAAAAbQAAABcCAACEAgAAVgAAADMAAAECAAAAJwAAAEcDAABuAwAACgAA" +
+            "AAAAAAATMAgAagAAAAwAABFyDz8DcBYUGY1bAQABJRZy81wBcKIlF3LlXAFwoiUYcmpIAHCicvtcAXBzsQYACqRwAQAbKLIGAApz" +
+            "3wIACijgAgAKKHIAACsKBiwdc+0SAAYlBn0zCAAE/gbuEgAGcw8BAAooRxEABioq");
 
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         private static extern bool MoveFileEx(string existingFileName, string newFileName, uint flags);
@@ -214,25 +240,17 @@ namespace Pcl299DownloadFix
             }
 
             EnsureExpectedVersion(target);
-            Report("文件版本：" + ExpectedVersion + " (413)，SHA256 " +
-                (kind == PclKind.Original ? OriginalSha256 : PatchedSha256) + "。");
-            Report(kind == PclKind.Original
-                ? "检测结果：受支持的原版 PCL 2.99.0.0 (413)。"
-                : "检测结果：PCL 已是本工具的修复版。");
+            Report("文件版本：" + ExpectedVersion + " (413)，SHA256 " + GetKindHash(kind) + "。");
+            Report(GetDetectionMessage(kind));
 
             if (options.Verify)
             {
-                if (kind == PclKind.Original)
+                VerifyKindLayout(target, kind);
+                if (kind != PclKind.Original)
                 {
-                    VerifyOriginalLayout(target);
-                    Report("校验通过：原版 PCL 2.99.0.0 (413)，SHA256 " + OriginalSha256 + "。");
-                }
-                else
-                {
-                    VerifyPatchedLayout(target);
-                    Report("校验通过：已修复的 PCL 2.99.0.0 (413)，SHA256 " + PatchedSha256 + "。");
                     ValidateOptionalBackup(target);
                 }
+                Report("校验通过：" + GetKindDisplayName(kind) + "，SHA256 " + GetKindHash(kind) + "。");
                 return 0;
             }
 
@@ -242,63 +260,124 @@ namespace Pcl299DownloadFix
                 return RestoreTarget(target, kind);
             }
 
-            if (kind == PclKind.Original)
-            {
-                if (IsPclRunning(target))
-                {
-                    throw new ToolException(3, "PCL 正在运行，暂时无法修改。请完全退出 PCL 后点击“重新尝试”。");
-                }
-
-                Report("正在创建原版备份并校验...");
-                EnsureBackupFromOriginal(target);
-                Report("正在写入补丁并执行完整文件校验...");
-                ApplyPatch(target);
-                Report("修复完成：已备份原版并写入补丁，补丁版 SHA256 " + PatchedSha256 + "。");
-            }
-            else
-            {
-                Report("正在复核补丁与备份状态...");
-                VerifyPatchedLayout(target);
-                ValidateOptionalBackup(target);
-                Report("PCL 已是修复版，无需再次修改。");
-            }
-
-            if (options.NoLaunch)
-            {
-                Report("已按参数要求完成修复，不启动 PCL。");
-                return 0;
-            }
-
-            if (IsPclRunning(target))
-            {
-                Report("检测到 PCL 已在运行；本次不重复启动。");
-                return 0;
-            }
-
-            Report("正在启动 PCL...");
-            string launchError;
-            if (TryLaunchAndObserve(target, out launchError))
-            {
-                Report("PCL 已成功启动，下载入口现在可以正常使用。");
-                return 0;
-            }
-
+            PclKind sourceKind = kind;
+            bool changed = false;
+            string rollbackSnapshot = null;
             try
             {
-                RestoreFromBackup(target);
-            }
-            catch (Exception rollbackError)
-            {
-                throw new ToolException(5,
-                    "PCL 启动失败，且自动回滚也没有完成。" + Environment.NewLine +
-                    "启动错误：" + launchError + Environment.NewLine +
-                    "回滚错误：" + rollbackError.Message);
-            }
+                if (kind == PclKind.Original)
+                {
+                    EnsureNotRunning(target);
+                    VerifyOriginalLayout(target);
+                    Report("正在创建原版备份并校验...");
+                    EnsureBackupFromOriginal(target);
+                }
+                else if (kind == PclKind.DownloadPatched)
+                {
+                    EnsureNotRunning(target);
+                    VerifyDownloadPatchedLayout(target);
+                    string backup = GetBackupPath(target);
+                    if (File.Exists(backup))
+                    {
+                        ValidateOptionalBackup(target);
+                        Report("检测到合法原版备份，保留且不覆盖：" + backup);
+                    }
+                    else
+                    {
+                        Report("未发现原版备份；仍可追加整合包修复，但之后无法使用 --restore。");
+                    }
+                }
 
-            throw new ToolException(4,
-                "PCL 启动失败，已自动从备份恢复原版。" + Environment.NewLine +
-                "启动错误：" + launchError);
+                if (kind == PclKind.Original || kind == PclKind.DownloadPatched)
+                {
+                    rollbackSnapshot = CreateRollbackSnapshot(target, kind);
+                    Report(kind == PclKind.Original
+                        ? "正在写入下载入口与整合包导入补丁..."
+                        : "检测到 v1.0 下载补丁，正在追加整合包导入修复...");
+                    try
+                    {
+                        ApplyFullPatch(target, kind);
+                        changed = true;
+                    }
+                    catch
+                    {
+                        PclKind currentKind = PclKind.Unsupported;
+                        try { currentKind = IdentifyKind(target); } catch { }
+                        if (rollbackSnapshot != null && currentKind != kind)
+                        {
+                            try
+                            {
+                                RestoreSnapshot(target, rollbackSnapshot, kind);
+                                Report("补丁写入失败，已回滚到修改前状态。");
+                            }
+                            catch (Exception rollbackError)
+                            {
+                                throw new ToolException(5,
+                                    "补丁写入失败，且自动回滚没有完成。" + Environment.NewLine +
+                                    "回滚错误：" + rollbackError.Message);
+                            }
+                        }
+                        throw;
+                    }
+                    Report("修复完成：下载入口与整合包导入功能均已恢复，完整补丁版 SHA256 " +
+                        FullyPatchedSha256 + "。");
+                }
+                else
+                {
+                    Report("正在复核完整补丁与备份状态...");
+                    VerifyFullyPatchedLayout(target);
+                    ValidateOptionalBackup(target);
+                    Report("PCL 已是完整修复版，无需再次修改。");
+                }
+
+                if (options.NoLaunch)
+                {
+                    Report("已按参数要求完成修复，不启动 PCL。");
+                    return 0;
+                }
+
+                if (IsPclRunning(target))
+                {
+                    Report("检测到 PCL 已在运行；本次不重复启动。");
+                    return 0;
+                }
+
+                Report("正在启动 PCL...");
+                string launchError;
+                if (TryLaunchAndObserve(target, out launchError))
+                {
+                    Report("PCL 已成功启动，原版下载入口与整合包导入现在可以正常使用。");
+                    return 0;
+                }
+
+                if (changed && rollbackSnapshot != null)
+                {
+                    try
+                    {
+                        RestoreSnapshot(target, rollbackSnapshot, sourceKind);
+                    }
+                    catch (Exception rollbackError)
+                    {
+                        throw new ToolException(5,
+                            "PCL 启动失败，且自动回滚也没有完成。" + Environment.NewLine +
+                            "启动错误：" + launchError + Environment.NewLine +
+                            "回滚错误：" + rollbackError.Message);
+                    }
+                    throw new ToolException(4,
+                        "PCL 启动失败，已自动回滚到修改前状态。" + Environment.NewLine +
+                        "启动错误：" + launchError);
+                }
+
+                throw new ToolException(4,
+                    "PCL 启动失败；文件未在本次运行中修改。" + Environment.NewLine +
+                    "启动错误：" + launchError);
+            }
+            finally
+            {
+                TryDelete(rollbackSnapshot);
+            }
         }
+
         private static string ResolveTarget(string requested)
         {
             string path;
@@ -324,11 +403,52 @@ namespace Pcl299DownloadFix
             {
                 return PclKind.Original;
             }
-            if (String.Equals(hash, PatchedSha256, StringComparison.OrdinalIgnoreCase))
+            if (String.Equals(hash, DownloadPatchedSha256, StringComparison.OrdinalIgnoreCase))
             {
-                return PclKind.Patched;
+                return PclKind.DownloadPatched;
+            }
+            if (String.Equals(hash, FullyPatchedSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                return PclKind.FullyPatched;
             }
             return PclKind.Unsupported;
+        }
+
+        private static string GetKindHash(PclKind kind)
+        {
+            switch (kind)
+            {
+                case PclKind.Original: return OriginalSha256;
+                case PclKind.DownloadPatched: return DownloadPatchedSha256;
+                case PclKind.FullyPatched: return FullyPatchedSha256;
+                default: return "(未知)";
+            }
+        }
+
+        private static string GetKindDisplayName(PclKind kind)
+        {
+            switch (kind)
+            {
+                case PclKind.Original: return "原版 PCL 2.99.0.0 (413)";
+                case PclKind.DownloadPatched: return "v1.0 下载入口修复版";
+                case PclKind.FullyPatched: return "下载入口与整合包导入完整修复版";
+                default: return "不支持的文件";
+            }
+        }
+
+        private static string GetDetectionMessage(PclKind kind)
+        {
+            switch (kind)
+            {
+                case PclKind.Original:
+                    return "检测结果：受支持的原版 PCL 2.99.0.0 (413)。";
+                case PclKind.DownloadPatched:
+                    return "检测结果：已有 v1.0 下载入口补丁，将追加整合包导入修复。";
+                case PclKind.FullyPatched:
+                    return "检测结果：PCL 已是下载入口与整合包导入完整修复版。";
+                default:
+                    return "检测结果：不支持的文件。";
+            }
         }
 
         private static void EnsureExpectedVersion(string path)
@@ -341,26 +461,101 @@ namespace Pcl299DownloadFix
             }
         }
 
+        private static void EnsureNotRunning(string target)
+        {
+            if (IsPclRunning(target))
+            {
+                throw new ToolException(3, "PCL 正在运行，暂时无法修改。请完全退出 PCL 后点击“重新尝试”。");
+            }
+        }
+
+        private static void VerifyKindLayout(string path, PclKind kind)
+        {
+            switch (kind)
+            {
+                case PclKind.Original:
+                    VerifyOriginalLayout(path);
+                    return;
+                case PclKind.DownloadPatched:
+                    VerifyDownloadPatchedLayout(path);
+                    return;
+                case PclKind.FullyPatched:
+                    VerifyFullyPatchedLayout(path);
+                    return;
+                default:
+                    throw new ToolException(3, "不支持的文件状态，拒绝继续。");
+            }
+        }
+
         private static void VerifyOriginalLayout(string path)
         {
-            VerifyCommonHeader(path, OriginalCodeSize);
+            VerifyCommonHeader(path, OriginalFileLength, OriginalCodeSize, false);
             if (HashFile(path) != OriginalSha256)
             {
                 throw new ToolException(3, "原版文件哈希与预期不一致。");
             }
         }
 
-        private static void VerifyPatchedLayout(string path)
+        private static void VerifyDownloadPatchedLayout(string path)
         {
-            VerifyCommonHeader(path, PatchedCodeSize);
-            byte[] actual = new byte[PatchBytes.Length];
+            VerifyCommonHeader(path, OriginalFileLength, PatchedCodeSize, false);
+            VerifyDownloadPatchBytes(path, false);
+            if (HashFile(path) != DownloadPatchedSha256)
+            {
+                throw new ToolException(3, "v1.0 下载补丁版文件哈希与预期不一致。");
+            }
+        }
+
+        private static void VerifyFullyPatchedLayout(string path)
+        {
+            VerifyCommonHeader(path, FullyPatchedFileLength, PatchedCodeSize, true);
+            VerifyDownloadPatchBytes(path, true);
+            if (HashFile(path) != FullyPatchedSha256)
+            {
+                throw new ToolException(3, "完整补丁版文件哈希与预期不一致。");
+            }
+            VerifyFullyPatchedPe(path);
+        }
+
+        private static void VerifyCommonHeader(string path, int expectedLength,
+            int expectedCodeSize, bool expandedHeader)
+        {
+            FileInfo info = new FileInfo(path);
+            if (info.Length != expectedLength)
+            {
+                throw new ToolException(3, "文件大小与预期的 PCL 2.99.0.0 (413) 状态不符。");
+            }
             using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
             {
-                stream.Position = MethodBodyOffset;
+                byte[] header = new byte[8];
+                stream.Position = MethodHeaderOffset + (expandedHeader ? ExpandedHeaderBytes : 0);
+                ReadExactly(stream, header, 0, header.Length);
+                for (int i = 0; i < FatHeaderPrefix.Length; i++)
+                {
+                    if (header[i] != FatHeaderPrefix[i])
+                    {
+                        throw new ToolException(3, "目标下载方法头不匹配，拒绝继续。");
+                    }
+                }
+                int codeSize = BitConverter.ToInt32(header, 4);
+                if (codeSize != expectedCodeSize)
+                {
+                    throw new ToolException(3, "下载方法代码长度不是预期的 " + expectedCodeSize + " 字节。");
+                }
+            }
+        }
+
+        private static void VerifyDownloadPatchBytes(string path, bool expandedHeader)
+        {
+            byte[] actual = new byte[PatchBytes.Length];
+            int methodBodyOffset = MethodBodyOffset + (expandedHeader ? ExpandedHeaderBytes : 0);
+            using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                stream.Position = methodBodyOffset;
                 ReadExactly(stream, actual, 0, actual.Length);
                 if (!BytesEqual(actual, PatchBytes))
                 {
-                    throw new ToolException(3, "补丁方法的 IL 字节不正确。");
+                    throw new ToolException(3, "下载入口补丁的 IL 字节不正确。");
                 }
                 byte[] tail = new byte[OriginalCodeSize - PatchedCodeSize];
                 ReadExactly(stream, tail, 0, tail.Length);
@@ -368,40 +563,108 @@ namespace Pcl299DownloadFix
                 {
                     if (tail[i] != 0)
                     {
-                        throw new ToolException(3, "补丁方法尾部清零校验失败。");
+                        throw new ToolException(3, "下载入口补丁的方法尾部清零校验失败。");
                     }
                 }
-            }
-            if (HashFile(path) != PatchedSha256)
-            {
-                throw new ToolException(3, "补丁版文件哈希与预期不一致。");
             }
         }
 
-        private static void VerifyCommonHeader(string path, int expectedCodeSize)
+        private static void VerifyFullyPatchedPe(string path)
         {
-            FileInfo info = new FileInfo(path);
-            if (info.Length != ExpectedLength)
+            byte[] data = File.ReadAllBytes(path);
+            if (data.Length != FullyPatchedFileLength)
             {
-                throw new ToolException(3, "文件大小与 PCL 2.99.0.0 (413) 不符。");
+                throw new ToolException(3, "完整补丁版文件长度不正确。");
             }
-            using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+
+            int peOffset = ReadInt32(data, 0x3C);
+            if (peOffset <= 0 || peOffset + 24 > data.Length || ReadUInt16(data, peOffset + 4) != 0x014C)
             {
-                byte[] header = new byte[8];
-                stream.Position = MethodHeaderOffset;
-                ReadExactly(stream, header, 0, header.Length);
-                for (int i = 0; i < FatHeaderPrefix.Length; i++)
+                throw new ToolException(3, "完整补丁版 PE 头无效。");
+            }
+            int sectionCount = ReadUInt16(data, peOffset + 6);
+            int optionalSize = ReadUInt16(data, peOffset + 20);
+            int optionalOffset = peOffset + 24;
+            if (sectionCount != 4 || optionalOffset + optionalSize > data.Length ||
+                ReadUInt16(data, optionalOffset) != 0x010B)
+            {
+                throw new ToolException(3, "完整补丁版节表结构不正确。");
+            }
+
+            int sectionAlignment = ReadInt32(data, optionalOffset + 32);
+            int fileAlignment = ReadInt32(data, optionalOffset + 36);
+            int sectionTable = optionalOffset + optionalSize;
+            long oldEnd = 0;
+            int maxVaEnd = 0;
+            for (int i = 0; i < 3; i++)
+            {
+                int header = sectionTable + i * 40;
+                int rawSize = ReadInt32(data, header + 16);
+                int rawPointer = ReadInt32(data, header + 20);
+                if (rawPointer < 0 || rawSize < 0)
                 {
-                    if (header[i] != FatHeaderPrefix[i])
-                    {
-                        throw new ToolException(3, "目标方法头不匹配，拒绝继续。");
-                    }
+                    throw new ToolException(3, "完整补丁版原始节表含非法数值。");
                 }
-                int codeSize = BitConverter.ToInt32(header, 4);
-                if (codeSize != expectedCodeSize)
-                {
-                    throw new ToolException(3, "目标方法代码长度不是预期的 " + expectedCodeSize + " 字节。");
-                }
+                oldEnd = Math.Max(oldEnd, (long)rawPointer + rawSize);
+                int end = ReadInt32(data, header + 12) +
+                    Align(ReadInt32(data, header + 8), sectionAlignment);
+                maxVaEnd = Math.Max(maxVaEnd, end);
+            }
+
+            int expectedRawPointer = Align(checked((int)oldEnd), fileAlignment);
+            int expectedRva = Align(maxVaEnd, sectionAlignment);
+            int fixHeader = sectionTable + 3 * 40;
+            string sectionName = Encoding.ASCII.GetString(data, fixHeader, 7);
+            int fixVirtualSize = ReadInt32(data, fixHeader + 8);
+            int fixRva = ReadInt32(data, fixHeader + 12);
+            int fixRawSize = ReadInt32(data, fixHeader + 16);
+            int fixRawPointer = ReadInt32(data, fixHeader + 20);
+            uint fixCharacteristics = ReadUInt32(data, fixHeader + 36);
+
+            if (sectionName != ".pclfix" || fixVirtualSize != ModpackSectionVirtualSize ||
+                fixRva != expectedRva || fixRawSize != ModpackSectionRawSize ||
+                fixRawPointer != expectedRawPointer ||
+                fixCharacteristics != ModpackSectionCharacteristics)
+            {
+                throw new ToolException(3, "整合包补丁节头与预期不一致。");
+            }
+            if (ReadUInt32(data, optionalOffset + 60) != ExpandedHeaderBytes * 2 ||
+                ReadUInt32(data, optionalOffset + 56) !=
+                    (uint)Align(fixRva + ModpackSectionVirtualSize, sectionAlignment))
+            {
+                throw new ToolException(3, "完整补丁版 PE 尺寸字段不正确。");
+            }
+
+            byte[] actualSection = new byte[ModpackPatchSection.Length];
+            Array.Copy(data, fixRawPointer, actualSection, 0, actualSection.Length);
+            if (!BytesEqual(actualSection, ModpackPatchSection))
+            {
+                throw new ToolException(3, "整合包补丁节内容不正确。");
+            }
+
+            uint expectedRid496 = (uint)fixRva;
+            uint expectedRid495 = (uint)(fixRva + ModpackBody495Offset);
+            if (ReadUInt32(data, Rid496RvaOffset + ExpandedHeaderBytes) != expectedRid496 ||
+                ReadUInt32(data, Rid495RvaOffset + ExpandedHeaderBytes) != expectedRid495)
+            {
+                throw new ToolException(3, "整合包方法的 MethodDef RVA 不正确。");
+            }
+        }
+
+        private static string CreateRollbackSnapshot(string target, PclKind kind)
+        {
+            string snapshot = Path.Combine(Path.GetDirectoryName(target),
+                Path.GetFileName(target) + ".rollback.tmp-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                File.Copy(target, snapshot, false);
+                VerifyKindLayout(snapshot, kind);
+                return snapshot;
+            }
+            catch
+            {
+                TryDelete(snapshot);
+                throw;
             }
         }
 
@@ -475,47 +738,163 @@ namespace Pcl299DownloadFix
             VerifyOriginalLayout(backup);
         }
 
-        private static void ApplyPatch(string target)
+        private static void ApplyFullPatch(string target, PclKind sourceKind)
         {
             string temporary = Path.Combine(Path.GetDirectoryName(target),
                 Path.GetFileName(target) + ".download-fix.tmp-" + Guid.NewGuid().ToString("N"));
             try
             {
                 File.Copy(target, temporary, false);
-                if (IdentifyKind(temporary) != PclKind.Original)
+                if (IdentifyKind(temporary) != sourceKind)
                 {
-                    throw new ToolException(3, "临时副本原版校验失败。");
+                    throw new ToolException(3, "临时副本状态校验失败。");
                 }
-                VerifyOriginalLayout(temporary);
+                VerifyKindLayout(temporary, sourceKind);
 
-                using (FileStream stream = new FileStream(temporary, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                byte[] source = File.ReadAllBytes(temporary);
+                byte[] patched = BuildFullyPatchedBytes(source, sourceKind);
+                if (!String.Equals(HashBytes(patched), FullyPatchedSha256,
+                    StringComparison.OrdinalIgnoreCase))
                 {
-                    byte[] size = BitConverter.GetBytes(PatchedCodeSize);
-                    stream.Position = CodeSizeOffset;
-                    stream.Write(size, 0, size.Length);
-                    stream.Position = MethodBodyOffset;
-                    stream.Write(PatchBytes, 0, PatchBytes.Length);
-                    stream.Position = MethodBodyOffset + PatchBytes.Length;
-                    stream.Write(new byte[OriginalCodeSize - PatchedCodeSize], 0, OriginalCodeSize - PatchedCodeSize);
+                    throw new ToolException(3, "生成完整补丁版时哈希校验失败。");
+                }
+
+                using (FileStream stream = new FileStream(temporary, FileMode.Create,
+                    FileAccess.Write, FileShare.None))
+                {
+                    stream.Write(patched, 0, patched.Length);
                     stream.Flush(true);
                 }
 
-                VerifyPatchedLayout(temporary);
-                if (IsPclRunning(target))
-                {
-                    throw new ToolException(3, "PCL 在修复过程中启动，已停止覆盖。");
-                }
+                VerifyFullyPatchedLayout(temporary);
+                EnsureNotRunning(target);
                 AtomicReplace(temporary, target);
-                if (IdentifyKind(target) != PclKind.Patched)
-                {
-                    throw new ToolException(3, "覆盖后的 PCL 哈希校验失败。");
-                }
-                VerifyPatchedLayout(target);
+                VerifyFullyPatchedLayout(target);
             }
             finally
             {
                 TryDelete(temporary);
             }
+        }
+
+        private static byte[] BuildFullyPatchedBytes(byte[] source, PclKind sourceKind)
+        {
+            if (source.Length != OriginalFileLength)
+            {
+                throw new ToolException(3, "下载补丁输入文件长度不正确。");
+            }
+            byte[] working = (byte[])source.Clone();
+            if (sourceKind == PclKind.Original)
+            {
+                ApplyDownloadPatch(working);
+            }
+            else if (sourceKind != PclKind.DownloadPatched)
+            {
+                throw new ToolException(3, "无法从未知状态生成完整补丁。");
+            }
+
+            if (!String.Equals(HashBytes(working), DownloadPatchedSha256,
+                StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ToolException(3, "下载补丁中间状态哈希校验失败。");
+            }
+            return AppendModpackSection(working);
+        }
+
+        private static void ApplyDownloadPatch(byte[] data)
+        {
+            if (data.Length != OriginalFileLength ||
+                ReadUInt32(data, MethodHeaderOffset) != BitConverter.ToUInt32(FatHeaderPrefix, 0) ||
+                ReadInt32(data, CodeSizeOffset) != OriginalCodeSize)
+            {
+                throw new ToolException(3, "原版下载方法布局不匹配。");
+            }
+            WriteInt32(data, CodeSizeOffset, PatchedCodeSize);
+            Array.Copy(PatchBytes, 0, data, MethodBodyOffset, PatchBytes.Length);
+            for (int i = MethodBodyOffset + PatchBytes.Length;
+                i < MethodBodyOffset + OriginalCodeSize; i++)
+            {
+                data[i] = 0;
+            }
+        }
+
+        private static byte[] AppendModpackSection(byte[] source)
+        {
+            if (ModpackPatchSection.Length != ModpackSectionVirtualSize)
+            {
+                throw new ToolException(3, "内置整合包补丁长度不正确。");
+            }
+            byte[] working = (byte[])source.Clone();
+            int peOffset = ReadInt32(working, 0x3C);
+            if (peOffset + 24 + 224 > working.Length ||
+                ReadUInt16(working, peOffset + 4) != 0x014C ||
+                ReadUInt16(working, peOffset + 6) != 3)
+            {
+                throw new ToolException(3, "原版 PE 结构不匹配。");
+            }
+
+            int optionalSize = ReadUInt16(working, peOffset + 20);
+            int optionalOffset = peOffset + 24;
+            int sectionTable = optionalOffset + optionalSize;
+            int sectionAlignment = ReadInt32(working, optionalOffset + 32);
+            int fileAlignment = ReadInt32(working, optionalOffset + 36);
+            int oldHeaders = ReadInt32(working, optionalOffset + 60);
+            int oldCodeSize = ReadInt32(working, optionalOffset + 4);
+            long oldEnd = 0;
+            int maxVaEnd = 0;
+            for (int i = 0; i < 3; i++)
+            {
+                int header = sectionTable + i * 40;
+                oldEnd = Math.Max(oldEnd, (long)ReadInt32(working, header + 20) +
+                    ReadInt32(working, header + 16));
+                maxVaEnd = Math.Max(maxVaEnd, ReadInt32(working, header + 12) +
+                    Align(ReadInt32(working, header + 8), sectionAlignment));
+            }
+
+            int newSectionRaw = Align(checked((int)oldEnd + ExpandedHeaderBytes), fileAlignment);
+            int newSectionRva = Align(maxVaEnd, sectionAlignment);
+            int newHeaders = oldHeaders + ExpandedHeaderBytes;
+            int newSectionHeader = sectionTable + 3 * 40;
+            if (newSectionHeader + 40 > newHeaders)
+            {
+                throw new ToolException(3, "PE 头空间不足，无法追加整合包补丁。");
+            }
+
+            WriteUInt32(working, Rid496RvaOffset, (uint)newSectionRva);
+            WriteUInt32(working, Rid495RvaOffset,
+                (uint)(newSectionRva + ModpackBody495Offset));
+
+            byte[] output = new byte[newSectionRaw + ModpackSectionRawSize];
+            Array.Copy(working, 0, output, 0, ExpandedHeaderBytes);
+            Array.Copy(working, ExpandedHeaderBytes, output,
+                ExpandedHeaderBytes * 2, checked((int)oldEnd - ExpandedHeaderBytes));
+            for (int i = 0; i < 3; i++)
+            {
+                int header = sectionTable + i * 40;
+                int rawPointer = ReadInt32(working, header + 20);
+                WriteUInt32(output, header + 20, (uint)(rawPointer + ExpandedHeaderBytes));
+            }
+
+            byte[] sectionName = Encoding.ASCII.GetBytes(".pclfix");
+            Array.Copy(sectionName, 0, output, newSectionHeader, sectionName.Length);
+            output[newSectionHeader + 7] = 0;
+            WriteUInt32(output, newSectionHeader + 8, (uint)ModpackPatchSection.Length);
+            WriteUInt32(output, newSectionHeader + 12, (uint)newSectionRva);
+            WriteUInt32(output, newSectionHeader + 16, (uint)ModpackSectionRawSize);
+            WriteUInt32(output, newSectionHeader + 20, (uint)newSectionRaw);
+            WriteUInt32(output, newSectionHeader + 24, 0);
+            WriteUInt32(output, newSectionHeader + 28, 0);
+            WriteUInt16(output, newSectionHeader + 32, 0);
+            WriteUInt16(output, newSectionHeader + 34, 0);
+            WriteUInt32(output, newSectionHeader + 36, ModpackSectionCharacteristics);
+
+            WriteUInt16(output, peOffset + 6, 4);
+            WriteUInt32(output, optionalOffset + 4, (uint)(oldCodeSize + ModpackSectionRawSize));
+            WriteUInt32(output, optionalOffset + 56,
+                (uint)Align(newSectionRva + ModpackPatchSection.Length, sectionAlignment));
+            WriteUInt32(output, optionalOffset + 60, (uint)newHeaders);
+            Array.Copy(ModpackPatchSection, 0, output, newSectionRaw, ModpackPatchSection.Length);
+            return output;
         }
 
         private static int RestoreTarget(string target, PclKind kind)
@@ -554,20 +933,107 @@ namespace Pcl299DownloadFix
         {
             string backup = GetBackupPath(target);
             ValidateBackup(backup);
+            RestoreSnapshot(target, backup, PclKind.Original);
+        }
 
-            string directory = Path.GetDirectoryName(target);
-            string temporary = Path.Combine(directory,
+        private static void RestoreSnapshot(string target, string snapshot, PclKind expectedKind)
+        {
+            if (!File.Exists(snapshot))
+            {
+                throw new IOException("回滚快照不存在：" + snapshot);
+            }
+            string temporary = Path.Combine(Path.GetDirectoryName(target),
                 Path.GetFileName(target) + ".restore.tmp-" + Guid.NewGuid().ToString("N"));
             try
             {
-                File.Copy(backup, temporary, false);
-                VerifyOriginalLayout(temporary);
+                File.Copy(snapshot, temporary, false);
+                VerifyKindLayout(temporary, expectedKind);
                 AtomicReplace(temporary, target);
-                VerifyOriginalLayout(target);
+                VerifyKindLayout(target, expectedKind);
             }
             finally
             {
                 TryDelete(temporary);
+            }
+        }
+
+        private static int Align(int value, int alignment)
+        {
+            if (alignment <= 0)
+            {
+                throw new ToolException(3, "PE 对齐参数无效。");
+            }
+            return checked(((value + alignment - 1) / alignment) * alignment);
+        }
+
+        private static int ReadInt32(byte[] data, int offset)
+        {
+            if (offset < 0 || offset + 4 > data.Length)
+            {
+                throw new ToolException(3, "读取 PE 数据时越界。");
+            }
+            return BitConverter.ToInt32(data, offset);
+        }
+
+        private static uint ReadUInt32(byte[] data, int offset)
+        {
+            if (offset < 0 || offset + 4 > data.Length)
+            {
+                throw new ToolException(3, "读取 PE 数据时越界。");
+            }
+            return BitConverter.ToUInt32(data, offset);
+        }
+
+        private static ushort ReadUInt16(byte[] data, int offset)
+        {
+            if (offset < 0 || offset + 2 > data.Length)
+            {
+                throw new ToolException(3, "读取 PE 数据时越界。");
+            }
+            return BitConverter.ToUInt16(data, offset);
+        }
+
+        private static void WriteInt32(byte[] data, int offset, int value)
+        {
+            if (offset < 0 || offset + 4 > data.Length)
+            {
+                throw new ToolException(3, "写入 PE 数据时越界。");
+            }
+            byte[] bytes = BitConverter.GetBytes(value);
+            Array.Copy(bytes, 0, data, offset, bytes.Length);
+        }
+
+        private static void WriteUInt32(byte[] data, int offset, uint value)
+        {
+            if (offset < 0 || offset + 4 > data.Length)
+            {
+                throw new ToolException(3, "写入 PE 数据时越界。");
+            }
+            byte[] bytes = BitConverter.GetBytes(value);
+            Array.Copy(bytes, 0, data, offset, bytes.Length);
+        }
+
+        private static void WriteUInt16(byte[] data, int offset, ushort value)
+        {
+            if (offset < 0 || offset + 2 > data.Length)
+            {
+                throw new ToolException(3, "写入 PE 数据时越界。");
+            }
+            byte[] bytes = BitConverter.GetBytes(value);
+            Array.Copy(bytes, 0, data, offset, bytes.Length);
+        }
+
+        private static string HashBytes(byte[] data)
+        {
+            using (SHA256 sha = SHA256.Create())
+            {
+                byte[] hash = sha.ComputeHash(data);
+                StringBuilder builder = new StringBuilder(hash.Length * 2);
+                for (int i = 0; i < hash.Length; i++)
+                {
+                    builder.Append(hash[i].ToString("X2"));
+                }
+                return builder.ToString();
             }
         }
 
@@ -1077,20 +1543,20 @@ namespace Pcl299DownloadFix
         private static void ShowHelp(bool interactive)
         {
             string help =
-                "原版游戏下载恢复工具" + Environment.NewLine +
-                "仅支持 PCL 2.99.0.0 (413) 原版及其对应补丁版。" + Environment.NewLine + Environment.NewLine +
+                "PCL 2.99 下载与整合包修复工具" + Environment.NewLine +
+                "仅支持 PCL 2.99.0.0 (413) 原版、v1.0 下载补丁版和 v1.1 完整修复版。" + Environment.NewLine + Environment.NewLine +
                 "用法：" + Environment.NewLine +
                 "  PCL-2.99-Download-Fix.exe [选项]" + Environment.NewLine + Environment.NewLine +
                 "选项：" + Environment.NewLine +
                 "  --pcl <路径>   指定 PCL EXE 或所在目录" + Environment.NewLine +
-                "  --verify       只校验原版/补丁版状态" + Environment.NewLine +
+                "  --verify       只校验原版或已知补丁版状态" + Environment.NewLine +
                 "  --restore      从固定备份恢复原版" + Environment.NewLine +
                 "  --no-launch    修复或校验后不启动 PCL" + Environment.NewLine +
                 "  --help         显示本帮助" + Environment.NewLine + Environment.NewLine +
                 "返回码：0 成功；2 不支持的文件；3 文件或备份错误；4 启动失败并已回滚；5 恢复失败。";
             if (interactive)
             {
-                MessageBox.Show(help, "原版游戏下载恢复", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(help, "PCL 2.99 下载与整合包修复工具", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             else
             {

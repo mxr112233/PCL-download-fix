@@ -308,7 +308,7 @@ namespace Pcl299DownloadFix
 
         internal FixerForm()
         {
-            Text = "原版游戏下载恢复工具";
+            Text = "PCL 2.99 下载与整合包修复工具";
             StartPosition = FormStartPosition.CenterScreen;
             ClientSize = new Size(720, 500);
             FormBorderStyle = FormBorderStyle.FixedSingle;
@@ -348,7 +348,7 @@ namespace Pcl299DownloadFix
             title.AutoSize = false;
             title.Location = new Point(90, 17);
             title.Size = new Size(600, 31);
-            title.Text = "原版游戏下载恢复";
+            title.Text = "下载与整合包导入修复";
             title.ForeColor = TextColor;
             title.Font = new Font("Microsoft YaHei UI", 17F, FontStyle.Bold, GraphicsUnit.Point, 134);
             header.Controls.Add(title);
@@ -357,7 +357,7 @@ namespace Pcl299DownloadFix
             subtitle.AutoSize = false;
             subtitle.Location = new Point(92, 51);
             subtitle.Size = new Size(590, 23);
-            subtitle.Text = "非官方第三方修复  ·  自动定位  ·  自动修复  ·  安全回滚";
+            subtitle.Text = "非官方第三方修复  ·  下载入口  ·  整合包导入  ·  安全回滚";
             subtitle.ForeColor = MutedColor;
             header.Controls.Add(subtitle);
 
@@ -431,7 +431,7 @@ namespace Pcl299DownloadFix
             footer.AutoSize = false;
             footer.Location = new Point(24, 434);
             footer.Size = new Size(460, 26);
-            footer.Text = "仅支持 PCL 2.99.0.0 (413)，其他版本不会被修改。";
+            footer.Text = "仅支持 PCL 2.99.0.0 (413) 的原版或已知修复版，其他文件不会被修改。";
             footer.ForeColor = MutedColor;
             Controls.Add(footer);
 
@@ -525,7 +525,7 @@ namespace Pcl299DownloadFix
                 exitCode = code;
                 if (code == 0)
                 {
-                    summary = "修复流程已完成。现在可以进入 PCL 的“下载 → 原版游戏”页面。";
+                    summary = "修复流程已完成。现在可以进入 PCL 的“下载 → 原版游戏”页面，也可以把整合包 ZIP 拖入 PCL 窗口导入。";
                     ShowSuccess(summary);
                 }
                 else
@@ -584,10 +584,13 @@ namespace Pcl299DownloadFix
                 SetProgress(100);
                 SetStatus("修复完成", SuccessColor);
                 string backup = targetPath + Program.BackupSuffix;
+                string backupLine = File.Exists(backup)
+                    ? "原版备份：" + backup
+                    : "原版备份：未找到（本次仍已完成修复，但无法通过 --restore 恢复）";
                 string details =
                     "PCL 路径：" + targetPath + Environment.NewLine +
-                    "原版备份：" + backup + Environment.NewLine + Environment.NewLine +
-                    "请进入 PCL 的“下载 → 原版游戏”页面使用。" + Environment.NewLine +
+                    backupLine + Environment.NewLine + Environment.NewLine +
+                    "请进入 PCL 的“下载 → 原版游戏”页面，或将整合包压缩包拖入 PCL 窗口。" + Environment.NewLine +
                     "如果 PCL 原本已打开且已是修复版，本次不会重复启动。";
                 using (ResultDialog dialog = new ResultDialog(true, 0, summary, details, false, null))
                 {
@@ -630,7 +633,7 @@ namespace Pcl299DownloadFix
         private string BuildDiagnostics(int code, string error, Exception exception)
         {
             StringBuilder builder = new StringBuilder();
-            builder.AppendLine("原版游戏下载恢复工具 - 诊断信息");
+            builder.AppendLine("PCL 2.99 下载与整合包修复工具 - 诊断信息");
             builder.AppendLine("时间：" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
             builder.AppendLine("工具版本：" + Assembly.GetExecutingAssembly().GetName().Version);
             builder.AppendLine("系统：" + Environment.OSVersion);
@@ -712,12 +715,13 @@ namespace Pcl299DownloadFix
                 SetProgress(50);
                 SetStatus("正在创建并校验原版备份...", AccentColor);
             }
-            else if (message.IndexOf("写入补丁", StringComparison.Ordinal) >= 0)
+            else if (message.IndexOf("写入下载入口", StringComparison.Ordinal) >= 0 ||
+                     message.IndexOf("追加整合包修复", StringComparison.Ordinal) >= 0)
             {
                 SetProgress(68);
-                SetStatus("正在写入补丁并校验文件...", AccentColor);
+                SetStatus("正在写入下载与整合包补丁并校验文件...", AccentColor);
             }
-            else if (message.IndexOf("复核补丁", StringComparison.Ordinal) >= 0)
+            else if (message.IndexOf("复核完整补丁", StringComparison.Ordinal) >= 0)
             {
                 SetProgress(62);
                 SetStatus("正在复核已有修复状态...", AccentColor);

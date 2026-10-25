@@ -2,7 +2,7 @@
 
 # PCL-download-fix
 
-**为 Plain Craft Launcher 2 恢复“下载 → 原版游戏”入口**
+**为 Plain Craft Launcher 2 恢复原版下载与整合包导入**
 
 [![Latest Release](https://img.shields.io/github/v/release/mxr112233/PCL-download-fix?style=flat-square&label=release&color=2f81f7)](https://github.com/mxr112233/PCL-download-fix/releases/latest)
 [![PCL](https://img.shields.io/badge/PCL-2.99.0.0%20%28413%29-2f81f7?style=flat-square)](https://github.com/mxr112233/PCL-download-fix)
@@ -22,9 +22,9 @@
 
 ## 这是什么
 
-`PCL-download-fix` 是一个针对 **Plain Craft Launcher 2 `2.99.0.0 (413)`** 的本地修补工具，用于恢复被禁用的原版 Minecraft 下载入口。
+`PCL-download-fix` 是一个针对 **Plain Craft Launcher 2 `2.99.0.0 (413)`** 的本地修补工具，用于恢复被禁用的原版 Minecraft 下载入口，以及把整合包 ZIP 拖入 PCL 窗口导入的功能。
 
-它只修改 `PCL.PageDownloadInstall.LoaderInit` 这一个方法，不会改动 PCL 元数据、账户、存档或其他下载模块。
+它会修复 `PCL.PageDownloadInstall.LoaderInit` 的下载入口，并通过新增 `.pclfix` 节重定向 `PCL.ModModpack::ModpackInstall` 的两个入口；不会改动 PCL 元数据、账户、存档或其他下载模块。
 
 ## 快速开始
 
@@ -32,7 +32,7 @@
 2. 完全退出 PCL 和正在运行的游戏。
 3. 解压后双击 `PCL-2.99-Download-Fix.exe`。
 4. 等待工具自动定位、校验、备份、修复并启动 PCL。
-5. 看到“修复完成”弹窗后，进入 PCL 的 **下载 → 原版游戏**。
+5. 看到“修复完成”弹窗后，进入 PCL 的 **下载 → 原版游戏**，或把整合包 ZIP 拖入 PCL 窗口导入。
 
 > 建议把工具放在 PCL 主程序同目录，定位会更快。工具也支持从其他位置自动搜索 PCL；找不到时会要求手动选择。
 
@@ -45,11 +45,11 @@
 | 定位 | 自动查找 PCL 主程序，也支持手动选择 |
 | 校验 | 只接受指定版本和 SHA256 的原版或补丁版文件 |
 | 备份 | 首次修复时创建固定原版备份，不覆盖已有合法备份 |
-| 修复 | 对目标方法做精确字节替换，并复核补丁结果 |
+| 修复 | 写入下载入口补丁、追加 `.pclfix` 整合包修复节，并复核完整文件 |
 | 启动 | 修复后启动 PCL；启动异常时自动尝试回滚 |
 | 反馈 | 显示进度、步骤日志和成功/失败弹窗 |
 
-如果 PCL 已经是补丁版，重复运行不会再次修改文件，只会校验并启动。
+v1.0 下载补丁版会自动升级为同时支持整合包导入的 v1.1 完整修复版；如果已经是完整修复版，重复运行不会再次修改文件，只会校验并启动。
 
 ## 界面与诊断
 
@@ -69,12 +69,13 @@
 
 ## 支持范围
 
-只接受以下两个完整文件之一，其他版本或哈希一律拒绝：
+只接受以下三个完整文件之一，其他版本或哈希一律拒绝：
 
 | 状态 | 版本 | 文件大小 | SHA256 |
 | --- | --- | ---: | --- |
 | 原版 | `2.99.0.0 (413)` | 5,980,160 字节 | `6B6E1260CB5A1D6A303855F1C60CAB3D0BC1AEBBA7E40A964180188B271E7386` |
-| 补丁版 | `2.99.0.0 (413)` | 5,980,160 字节 | `34DE99E6F4ECFF3DE6B7DFFFAD14B501ABEAA5BB61047CCA541BC067A6B9CBE7` |
+| v1.0 下载补丁版 | `2.99.0.0 (413)` | 5,980,160 字节 | `34DE99E6F4ECFF3DE6B7DFFFAD14B501ABEAA5BB61047CCA541BC067A6B9CBE7` |
+| v1.1 完整修复版 | `2.99.0.0 (413)` | 5,982,208 字节 | `AFC49BCD281D365D01D17C349C559DDB344DB00D9E403FFE088A47F83D88B9BB` |
 
 未知版本、未知哈希、非法备份或无法识别的文件不会被修改。
 
@@ -106,7 +107,7 @@ Plain Craft Launcher 2.exe.pcl-download-fix.bak
 | --- | --- |
 | `.\PCL-2.99-Download-Fix.exe` | 自动定位、修复并启动 |
 | `.\PCL-2.99-Download-Fix.exe --pcl "路径" --no-launch` | 指定 PCL 路径，只修复不启动 |
-| `.\PCL-2.99-Download-Fix.exe --verify` | 校验当前文件是原版还是补丁版 |
+| `.\PCL-2.99-Download-Fix.exe --verify` | 校验当前文件是原版、v1.0 下载补丁版还是 v1.1 完整修复版 |
 | `.\PCL-2.99-Download-Fix.exe --restore` | 从固定备份恢复原版 |
 | `.\PCL-2.99-Download-Fix.exe --help` | 显示帮助 |
 
@@ -122,15 +123,26 @@ Plain Craft Launcher 2.exe.pcl-download-fix.bak
 
 ## 修复内容
 
-静态分析确认目标方法为：
+静态分析确认本工具包含两组目标修复：
+
+**原版下载入口**
 
 - MethodDef：`0x06000513`
 - 方法：`PCL.PageDownloadInstall.LoaderInit`
-- 方法头文件偏移：`0x2C0B4`
-- CIL 文件偏移：`0x2C0C0`
+- 原版方法头文件偏移：`0x2C0B4`
+- 原版 CIL 文件偏移：`0x2C0C0`
 - `code_size`：`94 → 51`
 
-补丁恢复对 `ControlInit()` 和 `PageLoaderInit(..., DlClientListLoader, AddressOf LoadMinecraft_OnFinish)` 的直接调用，不再引用只显示“关闭下载”提示的异常闭包。全文件与原版的差异仅位于目标方法头和方法体。
+下载补丁恢复对 `ControlInit()` 和 `PageLoaderInit(..., DlClientListLoader, AddressOf LoadMinecraft_OnFinish)` 的直接调用，不再引用只显示“关闭下载”提示的异常闭包。
+
+**整合包导入**
+
+- `PCL.ModModpack::ModpackInstall()`：MethodDef RID `495`
+- `PCL.ModModpack::ModpackInstall(String, String, String)`：MethodDef RID `496`
+- 两个 MethodDef 的 RVA 均重定向到追加的 `.pclfix` PE 节
+- `.pclfix`：VirtualSize `0x44A`，RawSize `0x600`
+
+这样拖入整合包 ZIP 时不再进入“遵守相关法规，暂不提供下载功能”的提示路径。完整修复版会在原文件基础上追加新节并同步修正 PE 节表、镜像大小和 RVA；最终文件大小为 `5,982,208` 字节。
 
 工具不会下载或内置 PCL，只对用户本地已持有的精确版本文件做字节级修复。
 
