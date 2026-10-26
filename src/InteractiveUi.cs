@@ -590,7 +590,9 @@ namespace Pcl299DownloadFix
                 string details =
                     "PCL 路径：" + targetPath + Environment.NewLine +
                     backupLine + Environment.NewLine + Environment.NewLine +
-                    "请进入 PCL 的“下载 → 原版游戏”页面，或将整合包压缩包拖入 PCL 窗口。" + Environment.NewLine +
+                    "请进入 PCL 的“下载 → 原版游戏”页面；整合包既可拖入 PCL 窗口，" +
+                    "也可点击“导入整合包”后选择压缩包。" + Environment.NewLine +
+                    "版本文件夹选取现已恢复，可选择 `.minecraft/versions` 下的实例目录。" + Environment.NewLine +
                     "如果 PCL 原本已打开且已是修复版，本次不会重复启动。";
                 using (ResultDialog dialog = new ResultDialog(true, 0, summary, details, false, null))
                 {
@@ -716,10 +718,11 @@ namespace Pcl299DownloadFix
                 SetStatus("正在创建并校验原版备份...", AccentColor);
             }
             else if (message.IndexOf("写入下载入口", StringComparison.Ordinal) >= 0 ||
-                     message.IndexOf("追加整合包修复", StringComparison.Ordinal) >= 0)
+                     message.IndexOf("写入 v1.2", StringComparison.Ordinal) >= 0 ||
+                     message.IndexOf("原地升级到 v1.2", StringComparison.Ordinal) >= 0)
             {
                 SetProgress(68);
-                SetStatus("正在写入下载与整合包补丁并校验文件...", AccentColor);
+                SetStatus("正在写入下载、整合包导入与版本文件夹补丁...", AccentColor);
             }
             else if (message.IndexOf("复核完整补丁", StringComparison.Ordinal) >= 0)
             {

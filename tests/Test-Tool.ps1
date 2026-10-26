@@ -8,7 +8,9 @@ param(
 $ErrorActionPreference = 'Stop'
 $originalHash = '6B6E1260CB5A1D6A303855F1C60CAB3D0BC1AEBBA7E40A964180188B271E7386'
 $downloadPatchedHash = '34DE99E6F4ECFF3DE6B7DFFFAD14B501ABEAA5BB61047CCA541BC067A6B9CBE7'
-$fullyPatchedHash = 'AFC49BCD281D365D01D17C349C559DDB344DB00D9E403FFE088A47F83D88B9BB'
+$fullyPatchedV110Hash = 'AFC49BCD281D365D01D17C349C559DDB344DB00D9E403FFE088A47F83D88B9BB'
+$fullyPatchedHash = '34F774B3A5936905DC7C033B502B980685B9EAE74D2E0D705DB459E376FC7DCB'
+$modpackBody495Hex = '13300A00820000000C000011720F3F03701614178D7001001B2516198D5B0100012516726A480070A2251772F35C0170A2251872E55C0170A272FB5C017073B106000AA47001001B28B206000A73DF02000A28E002000A287200002BFE0E0000FE0C0000287E00000A3A1F00000073ED12000625FE0C00007D33080004FE06EE120006730F01000A28471100062A'
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $runRoot = Join-Path $PSScriptRoot ('run-' + [Guid]::NewGuid().ToString('N'))
 $passed = 0
@@ -185,6 +187,110 @@ function New-DownloadPatchedCopy {
     return $target
 }
 
+function Get-PeLayout {
+    param([byte[]]$Bytes)
+    $peOffset = [BitConverter]::ToInt32($Bytes, 0x3C)
+    $optionalOffset = $peOffset + 24
+    $optionalSize = [BitConverter]::ToUInt16($Bytes, $peOffset + 20)
+    return [pscustomobject]@{
+        PeOffset = $peOffset
+        OptionalOffset = $optionalOffset
+        SectionTable = $optionalOffset + $optionalSize
+        SectionCount = [BitConverter]::ToUInt16($Bytes, $peOffset + 6)
+        SectionAlignment = [BitConverter]::ToInt32($Bytes, $optionalOffset + 32)
+        FileAlignment = [BitConverter]::ToInt32($Bytes, $optionalOffset + 36)
+    }
+}
+
+function Get-FileOffsetFromRva {
+    param([byte[]]$Bytes, [uint32]$Rva)
+    $layout = Get-PeLayout $Bytes
+    for ($i = 0; $i -lt $layout.SectionCount; $i++) {
+        $header = $layout.SectionTable + $i * 40
+        $virtualSize = [BitConverter]::ToUInt32($Bytes, $header + 8)
+        $virtualAddress = [BitConverter]::ToUInt32($Bytes, $header + 12)
+        $rawSize = [BitConverter]::ToUInt32($Bytes, $header + 16)
+        $rawPointer = [BitConverter]::ToUInt32($Bytes, $header + 20)
+        $mappedSize = if ($virtualSize -eq 0) { $rawSize } else { $virtualSize }
+        if ($Rva -ge $virtualAddress -and $Rva -lt ($virtualAddress + $mappedSize)) {
+            return [int]($rawPointer + ($Rva - $virtualAddress))
+        }
+    }
+    throw "无法把 RVA $Rva 映射为文件偏移。"
+}
+
+function Get-MethodRva {
+    param([byte[]]$Bytes, [int]$Rid, [bool]$ExpandedHeader)
+    $headerAdjustment = if ($ExpandedHeader) { 0x200 } else { 0 }
+    $row = 0x0AFD46 + $headerAdjustment + ($Rid - 495) * 0x12
+    return [BitConverter]::ToUInt32($Bytes, $row)
+}
+
+function Get-FolderScanOpcodeOffset {
+    param([byte[]]$Bytes, [bool]$ExpandedHeader)
+    $methodRva = Get-MethodRva $Bytes 5887 $ExpandedHeader
+    $methodOffset = Get-FileOffsetFromRva $Bytes $methodRva
+    if (($Bytes[$methodOffset] -band 0x03) -ne 0x03) {
+        throw '版本文件夹扫描方法不是 Fat 方法头。'
+    }
+    $headerSize = ($Bytes[$methodOffset + 1] -shr 4) * 4
+    return $methodOffset + $headerSize + 0x6A
+}
+
+function Write-UInt32 {
+    param([byte[]]$Bytes, [int]$Offset, [uint32]$Value)
+    [Array]::Copy([BitConverter]::GetBytes($Value), 0, $Bytes, $Offset, 4)
+}
+
+function Assert-FullPatchLayout {
+    param([string]$Path)
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $layout = Get-PeLayout $bytes
+    Assert-Equal $layout.SectionCount 4 '完整补丁版应包含 4 个 PE 节'
+    $fixHeader = $layout.SectionTable + 3 * 40
+    $fixRva = [BitConverter]::ToUInt32($bytes, $fixHeader + 12)
+    $fixVirtualSize = [BitConverter]::ToUInt32($bytes, $fixHeader + 8)
+    Assert-Equal $fixVirtualSize 0x4E0 'v1.2 .pclfix 虚拟大小'
+    Assert-Equal (Get-MethodRva $bytes 496 $true) $fixRva '拖入整合包入口 RID 496 RVA'
+    Assert-Equal (Get-MethodRva $bytes 495 $true) ($fixRva + 0x450) '点击导入整合包入口 RID 495 RVA'
+    $bodyOffset = Get-FileOffsetFromRva $bytes (Get-MethodRva $bytes 495 $true)
+    $bodyBytes = New-Object byte[] ($modpackBody495Hex.Length / 2)
+    for ($i = 0; $i -lt $bodyBytes.Length; $i++) {
+        $bodyBytes[$i] = [Convert]::ToByte($modpackBody495Hex.Substring($i * 2, 2), 16)
+    }
+    for ($i = 0; $i -lt $bodyBytes.Length; $i++) {
+        Assert-Equal $bytes[$bodyOffset + $i] $bodyBytes[$i] "RID 495 方法体字节 $i"
+    }
+    Assert-Equal $bytes[(Get-FolderScanOpcodeOffset $bytes $true)] 0x16 '版本文件夹扫描参数应为 false'
+}
+
+function New-FullyPatchedV110Copy {
+    param([string]$Name)
+    $target = New-OriginalCopy $Name
+    $result = Invoke-Tool $Tool @('--pcl', $target, '--no-launch')
+    if ($result.ExitCode -ne 0) {
+        throw "构造 v1.1 测试输入时修复 v1.2 失败，退出码 $($result.ExitCode)：$($result.Output)"
+    }
+    if ((Get-Sha256 $target) -ne $fullyPatchedHash) {
+        throw '构造 v1.1 测试输入时 v1.2 文件哈希不正确。'
+    }
+
+    $bytes = [IO.File]::ReadAllBytes($target)
+    $layout = Get-PeLayout $bytes
+    $fixHeader = $layout.SectionTable + 3 * 40
+    $fixRva = [BitConverter]::ToUInt32($bytes, $fixHeader + 12)
+    $fixRawPointer = [BitConverter]::ToInt32($bytes, $fixHeader + 20)
+    [Array]::Clear($bytes, $fixRawPointer + 0x44A, 0x4E0 - 0x44A)
+    Write-UInt32 $bytes ($fixHeader + 8) 0x44A
+    Write-UInt32 $bytes (0x0AFD46 + 0x200) ($fixRva + 0x3D4)
+    $bytes[(Get-FolderScanOpcodeOffset $bytes $true)] = 0x17
+    [IO.File]::WriteAllBytes($target, $bytes)
+    if ((Get-Sha256 $target) -ne $fullyPatchedV110Hash) {
+        throw '构造 v1.1 测试输入失败，哈希不正确。'
+    }
+    return $target
+}
+
 if (-not (Test-Path -LiteralPath $OriginalPcl)) { throw "找不到原版 PCL：$OriginalPcl" }
 if (-not (Test-Path -LiteralPath $Tool)) { throw "找不到 Release 工具：$Tool" }
 if (-not (Test-Path -LiteralPath $HookTool)) { throw "找不到测试钩子工具，请先运行 build.ps1 -TestHooks：$HookTool" }
@@ -196,18 +302,18 @@ if (Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'Plain Craft Laun
 
 New-Item -ItemType Directory -Path $runRoot | Out-Null
 try {
-    Write-Host '[1/17] --help 返回 0'
+    Write-Host '[1/19] --help 返回 0'
     $result = Invoke-Tool $Tool @('--help')
     Assert-Equal $result.ExitCode 0 '--help 退出码'
     Assert-True ($result.Output -match 'PCL 2.99 下载与整合包修复工具') '--help 应输出版本标题'
     $passed++
 
-    Write-Host '[2/17] Release EXE 不含测试钩子'
+    Write-Host '[2/19] Release EXE 不含测试钩子'
     $releaseText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($Tool))
     Assert-True (-not $releaseText.Contains('PCL299_TEST_')) 'Release EXE 不应包含 PCL299_TEST_'
     $passed++
 
-    Write-Host '[3/17] 未知哈希返回 2 且不创建备份'
+    Write-Host '[3/19] 未知哈希返回 2 且不创建备份'
     $unsupportedDir = Join-Path $runRoot 'unsupported'
     New-Item -ItemType Directory -Path $unsupportedDir | Out-Null
     $unsupported = Join-Path $unsupportedDir 'not-pcl.exe'
@@ -219,7 +325,7 @@ try {
     Assert-True (-not (Test-Path -LiteralPath ($unsupported + '.pcl-download-fix.bak'))) '未知文件不得创建备份'
     $passed++
 
-    Write-Host '[4/17] 非法已有备份被拒绝且不覆盖'
+    Write-Host '[4/19] 非法已有备份被拒绝且不覆盖'
     $invalidBackupTarget = New-OriginalCopy 'invalid-backup'
     $invalidBackup = $invalidBackupTarget + '.pcl-download-fix.bak'
     [IO.File]::WriteAllBytes($invalidBackup, [byte[]](9, 8, 7, 6))
@@ -231,7 +337,7 @@ try {
     Assert-Equal (Get-Sha256 $invalidBackup) $backupBefore '非法备份不得被覆盖'
     $passed++
 
-    Write-Host '[5/17] PCL 运行中拒绝修改'
+    Write-Host '[5/19] PCL 运行中拒绝修改'
     $runningTarget = New-OriginalCopy 'running-refusal'
     $helperDir = Join-Path $runRoot 'running-helper'
     New-Item -ItemType Directory -Path $helperDir | Out-Null
@@ -270,16 +376,17 @@ try {
     }
     $passed++
 
-    Write-Host '[6/17] 原版首次修复生成完整补丁并创建备份'
+    Write-Host '[6/19] 原版首次修复生成完整补丁并创建备份'
     $mutableTarget = New-OriginalCopy 'mutation'
     $mutableBackup = $mutableTarget + '.pcl-download-fix.bak'
     $result = Invoke-Tool $Tool @('--pcl', $mutableTarget, '--no-launch')
     Assert-Equal $result.ExitCode 0 '首次修复退出码'
     Assert-Equal (Get-Sha256 $mutableTarget) $fullyPatchedHash '首次修复后的完整补丁哈希'
     Assert-Equal (Get-Sha256 $mutableBackup) $originalHash '首次修复创建的备份哈希'
+    Assert-FullPatchLayout $mutableTarget
     $passed++
 
-    Write-Host '[7/17] 完整补丁版重复运行只校验，不二次修改'
+    Write-Host '[7/19] v1.2 完整补丁版重复运行只校验，不二次修改'
     $patchedBefore = Get-Sha256 $mutableTarget
     $backupBefore = Get-Sha256 $mutableBackup
     $result = Invoke-Tool $Tool @('--pcl', $mutableTarget, '--no-launch')
@@ -288,7 +395,7 @@ try {
     Assert-Equal (Get-Sha256 $mutableBackup) $backupBefore '重复运行不得覆盖备份'
     $passed++
 
-    Write-Host '[8/17] v1.0 下载补丁版可追加整合包修复且不伪造备份'
+    Write-Host '[8/19] v1.0 下载补丁版可升级为 v1.2 且不伪造备份'
     $downloadTarget = New-DownloadPatchedCopy 'download-mutation'
     $result = Invoke-Tool $Tool @('--pcl', $downloadTarget, '--no-launch')
     Assert-Equal $result.ExitCode 0 'v1.0 迁移退出码'
@@ -296,7 +403,7 @@ try {
     Assert-True (-not (Test-Path -LiteralPath ($downloadTarget + '.pcl-download-fix.bak'))) '无原版文件时不得伪造备份'
     $passed++
 
-    Write-Host '[9/17] v1.0 迁移时合法已有备份不覆盖'
+    Write-Host '[9/19] v1.0 迁移时合法已有备份不覆盖'
     $preservedTarget = New-DownloadPatchedCopy 'preserved-backup'
     $preservedBackup = $preservedTarget + '.pcl-download-fix.bak'
     Copy-Item -LiteralPath $OriginalPcl -Destination $preservedBackup
@@ -310,7 +417,7 @@ try {
     Assert-True ($timestampDelta -lt 1) '合法已有备份不得被重新复制'
     $passed++
 
-    Write-Host '[10/17] --verify 正确识别原版、v1.0 和完整修复版'
+    Write-Host '[10/19] --verify 正确识别原版、v1.0、v1.1 和 v1.2'
     $verifyOriginal = New-OriginalCopy 'verify-original'
     $result = Invoke-Tool $Tool @('--pcl', $verifyOriginal, '--verify')
     Assert-Equal $result.ExitCode 0 '原版 --verify 退出码'
@@ -321,16 +428,21 @@ try {
     Assert-Equal $result.ExitCode 0 'v1.0 --verify 退出码'
     Assert-True ($result.Output -match 'v1\.0 下载入口修复版') '--verify 应识别 v1.0 下载补丁版'
 
+    $verifyV110 = New-FullyPatchedV110Copy 'verify-v110'
+    $result = Invoke-Tool $Tool @('--pcl', $verifyV110, '--verify')
+    Assert-Equal $result.ExitCode 0 'v1.1 --verify 退出码'
+    Assert-True ($result.Output -match 'v1\.1 整合包拖入修复版') '--verify 应识别 v1.1 修复版'
+
     $verifyFullDir = Join-Path $runRoot 'verify-full'
     New-Item -ItemType Directory -Path $verifyFullDir | Out-Null
     $verifyFull = Join-Path $verifyFullDir 'Plain Craft Launcher 2.exe'
     Copy-Item -LiteralPath $mutableTarget -Destination $verifyFull
     $result = Invoke-Tool $Tool @('--pcl', $verifyFull, '--verify')
-    Assert-Equal $result.ExitCode 0 '完整修复版 --verify 退出码'
-    Assert-True ($result.Output -match '整合包导入完整修复版') '--verify 应识别完整修复版'
+    Assert-Equal $result.ExitCode 0 'v1.2 --verify 退出码'
+    Assert-True ($result.Output -match 'v1\.2 下载、整合包与版本文件夹完整修复版') '--verify 应识别 v1.2 修复版'
     $passed++
 
-    Write-Host '[11/17] --restore 从完整修复版恢复原版并再次校验'
+    Write-Host '[11/19] --restore 从完整修复版恢复原版并再次校验'
     $result = Invoke-Tool $Tool @('--pcl', $mutableTarget, '--restore')
     Assert-Equal $result.ExitCode 0 '--restore 退出码'
     Assert-Equal (Get-Sha256 $mutableTarget) $originalHash '恢复后的原版哈希'
@@ -340,7 +452,7 @@ try {
     Assert-True ($result.Output -match '原版 PCL 2\.99\.0\.0') '恢复后 --verify 应识别原版'
     $passed++
 
-    Write-Host '[12/17] 原版启动失败自动回滚并返回 4'
+    Write-Host '[12/19] 原版启动失败自动回滚并返回 4'
     $rollbackTarget = New-OriginalCopy 'startup-rollback'
     $rollbackBackup = $rollbackTarget + '.pcl-download-fix.bak'
     $result = Invoke-Tool $HookTool @('--pcl', $rollbackTarget) @{ PCL299_TEST_STARTUP_FAILURE = '1' }
@@ -349,7 +461,7 @@ try {
     Assert-Equal (Get-Sha256 $rollbackBackup) $originalHash '原版启动失败后备份应保持原版'
     $passed++
 
-    Write-Host '[13/17] v1.0 启动失败回滚到 v1.0 且返回 4'
+    Write-Host '[13/19] v1.0 启动失败回滚到 v1.0 且返回 4'
     $downloadRollbackTarget = New-DownloadPatchedCopy 'download-startup-rollback'
     $result = Invoke-Tool $HookTool @('--pcl', $downloadRollbackTarget) @{ PCL299_TEST_STARTUP_FAILURE = '1' }
     Assert-Equal $result.ExitCode 4 'v1.0 启动失败退出码'
@@ -357,7 +469,27 @@ try {
     Assert-True (-not (Test-Path -LiteralPath ($downloadRollbackTarget + '.pcl-download-fix.bak'))) 'v1.0 回滚不得创建伪造备份'
     $passed++
 
-    Write-Host '[14/17] 新日志中的原版下载列表记录可通过非零退出码启动检查'
+    Write-Host '[14/19] v1.1 原地升级为 v1.2 并保留原版备份'
+    $v110Target = New-FullyPatchedV110Copy 'v110-mutation'
+    $v110Backup = $v110Target + '.pcl-download-fix.bak'
+    $result = Invoke-Tool $Tool @('--pcl', $v110Target, '--no-launch')
+    Assert-Equal $result.ExitCode 0 'v1.1 原地升级退出码'
+    Assert-Equal (Get-Sha256 $v110Target) $fullyPatchedHash 'v1.1 原地升级后的 v1.2 哈希'
+    Assert-Equal (Get-Sha256 $v110Backup) $originalHash 'v1.1 升级时原版备份应保持'
+    Assert-True ($result.Output -match '原地升级到 v1\.2') '日志应说明执行了 v1.1 原地升级'
+    Assert-FullPatchLayout $v110Target
+    $passed++
+
+    Write-Host '[15/19] v1.1 启动失败回滚到 v1.1 且返回 4'
+    $v110RollbackTarget = New-FullyPatchedV110Copy 'v110-startup-rollback'
+    $v110RollbackBackup = $v110RollbackTarget + '.pcl-download-fix.bak'
+    $result = Invoke-Tool $HookTool @('--pcl', $v110RollbackTarget) @{ PCL299_TEST_STARTUP_FAILURE = '1' }
+    Assert-Equal $result.ExitCode 4 'v1.1 启动失败退出码'
+    Assert-Equal (Get-Sha256 $v110RollbackTarget) $fullyPatchedV110Hash 'v1.1 启动失败后应恢复 v1.1'
+    Assert-Equal (Get-Sha256 $v110RollbackBackup) $originalHash 'v1.1 回滚时原版备份应保持'
+    $passed++
+
+    Write-Host '[16/19] 新日志中的原版下载列表记录可通过非零退出码启动检查'
     $evidenceTarget = New-OriginalCopy 'startup-evidence'
     $evidenceBackup = $evidenceTarget + '.pcl-download-fix.bak'
     $result = Invoke-Tool $HookTool @('--pcl', $evidenceTarget) @{
@@ -369,7 +501,7 @@ try {
     Assert-Equal (Get-Sha256 $evidenceBackup) $originalHash '有启动证据时备份应保持原版'
     $passed++
 
-    Write-Host '[15/17] GUI 自动定位、完整修复并显示成功弹窗'
+    Write-Host '[17/19] GUI 自动定位、完整修复并显示成功弹窗'
     $guiSuccessDir = Join-Path $runRoot 'gui-success'
     New-Item -ItemType Directory -Path $guiSuccessDir | Out-Null
     $guiTarget = Join-Path $guiSuccessDir 'Plain Craft Launcher 2.exe'
@@ -384,7 +516,7 @@ try {
     Assert-Equal (Get-Sha256 ($guiTarget + '.pcl-download-fix.bak')) $originalHash 'GUI 自动修复创建的备份哈希'
     $passed++
 
-    Write-Host '[16/17] GUI 修复失败弹窗、返回码和诊断日志'
+    Write-Host '[18/19] GUI 修复失败弹窗、返回码和诊断日志'
     $guiFailureDir = Join-Path $runRoot 'gui-failure'
     New-Item -ItemType Directory -Path $guiFailureDir | Out-Null
     $guiFailureTarget = Join-Path $guiFailureDir 'Plain Craft Launcher 2.exe'
@@ -405,7 +537,7 @@ try {
     Assert-True ($logText -match ('实际 SHA256：' + $failureBefore)) '诊断日志应包含实际 SHA256'
     $passed++
 
-    Write-Host '[17/17] 恢复失败返回 5 且不损坏备份'
+    Write-Host '[19/19] 恢复失败返回 5 且不损坏备份'
     $result = Invoke-Tool $Tool @('--pcl', $rollbackTarget, '--no-launch')
     Assert-Equal $result.ExitCode 0 '恢复失败测试前修复退出码'
     Assert-Equal (Get-Sha256 $rollbackTarget) $fullyPatchedHash '恢复失败测试前完整补丁哈希'
